@@ -1,4 +1,6 @@
-# locmodel-image
+# locmodel-image-MCP
+
+> GitHub 仓库：[jaja1620/locmodel-image-MCP](https://github.com/jaja1620/locmodel-image-MCP) ——可安装的包名、CLI 命令与 MCP 服务名仍为 `locmodel-image`（不带 `-MCP` 后缀）。
 
 **把本机 LocModel / stable-diffusion.cpp 的离线画图引擎，变成 AI Agent 可直接调用的工具——离线、免费、可脚本化。**
 
@@ -65,8 +67,8 @@ LocModel 自带完整的本地出图链路，但只提供桌面 GUI。Agent 和�
 无需编译，克隆即用：
 
 ```bash
-git clone https://github.com/<你的账号>/locmodel-image.git
-cd locmodel-image
+git clone https://github.com/jaja1620/locmodel-image-MCP.git
+cd locmodel-image-MCP
 python scripts/locmodel_image.py doctor
 ```
 
@@ -123,7 +125,7 @@ output/locmodel_20261109_171204_meta.json
   "mcpServers": {
     "locmodel-image": {
       "command": "python",
-      "args": ["C:/tools/locmodel-image/scripts/locmodel_mcp.py"],
+      "args": ["C:/tools/locmodel-image-MCP/scripts/locmodel_mcp.py"],
       "env": { "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1" }
     }
   }
@@ -139,7 +141,7 @@ Windows 上必须写**真实解释器的绝对路径**（例如 `C:/Users/you/Ap
   "name": "locmodel-image",
   "config": {
     "command": "C:\\Users\\you\\AppData\\Local\\Programs\\Python\\Python312\\python.exe",
-    "args": ["C:\\tools\\locmodel-image\\scripts\\locmodel_mcp.py"],
+    "args": ["C:\\tools\\locmodel-image-MCP\\scripts\\locmodel_mcp.py"],
     "env": { "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1" }
   }
 }

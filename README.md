@@ -1,4 +1,6 @@
-# locmodel-image
+# locmodel-image-MCP
+
+> GitHub repository: [jaja1620/locmodel-image-MCP](https://github.com/jaja1620/locmodel-image-MCP) — the installable package, the CLI command and the MCP server are still named `locmodel-image`.
 
 **Turn your local LocModel / stable-diffusion.cpp image engine into a first-class tool for AI agents — offline, free, scriptable.**
 
@@ -79,8 +81,8 @@ per model, and getting it wrong is the number-one cause of "workspace capacity" 
 Nothing to build. Clone and run:
 
 ```bash
-git clone https://github.com/<your-account>/locmodel-image.git
-cd locmodel-image
+git clone https://github.com/jaja1620/locmodel-image-MCP.git
+cd locmodel-image-MCP
 python scripts/locmodel_image.py doctor
 ```
 
@@ -142,7 +144,7 @@ The server speaks **newline-delimited JSON-RPC 2.0** over stdio (it also accepts
   "mcpServers": {
     "locmodel-image": {
       "command": "python",
-      "args": ["C:/tools/locmodel-image/scripts/locmodel_mcp.py"],
+      "args": ["C:/tools/locmodel-image-MCP/scripts/locmodel_mcp.py"],
       "env": { "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1" }
     }
   }
@@ -160,7 +162,7 @@ to the Microsoft Store stub, which silently exits.
   "name": "locmodel-image",
   "config": {
     "command": "C:\\Users\\you\\AppData\\Local\\Programs\\Python\\Python312\\python.exe",
-    "args": ["C:\\tools\\locmodel-image\\scripts\\locmodel_mcp.py"],
+    "args": ["C:\\tools\\locmodel-image-MCP\\scripts\\locmodel_mcp.py"],
     "env": { "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1" }
   }
 }

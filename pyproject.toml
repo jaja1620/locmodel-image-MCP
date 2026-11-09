@@ -19,7 +19,7 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/<your-account>/locmodel-image"
+Homepage = "https://github.com/jaja1620/locmodel-image-MCP"
 
 [project.scripts]
 locmodel-image = "locmodel_image:main"
