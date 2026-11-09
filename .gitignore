@@ -1,0 +1,17 @@
+﻿__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+.venv/
+output/
+e2e_*.json
+e2e_*.log
+e2e_done.flag
+pytest.log
+diag.err.txt
+.diag/
+*.png
+!docs/**/*.png
+e2e.log
