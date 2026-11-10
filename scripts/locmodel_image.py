@@ -1,7 +1,7 @@
 ﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-LocModel / stable-diffusion.cpp Image Bridge  (v2.0.0)
+LocModel / stable-diffusion.cpp Image Bridge  (v3.0.0)
 
 Cross-platform bridge that turns a local ``sd-server`` (stable-diffusion.cpp)
 HTTP engine -- typically shipped inside LocModel -- into a scriptable CLI that
@@ -51,6 +51,7 @@ import re
 import shutil
 import socket
 import subprocess
+import threading
 import sys
 import time
 import urllib.error
@@ -59,7 +60,7 @@ import urllib.request
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.0.0"
+VERSION = "3.0.0"
 APP_NAME = "locmodel-image"
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -111,6 +112,44 @@ DEFAULTS: dict = {
     },
     "gpu": {"min_free_mb_warn": 500},
     "output": {"dir": None},
+    # ---- v3.0 image editing ------------------------------------------------
+    # Discovery is read-only probing, but it is not free: launching PowerShell to
+    # read process command lines and connecting to closed ports both cost real
+    # seconds on a managed machine. These knobs bound that work.
+    "discover": {
+        "process_cache_ttl": 20,
+        "budget_seconds": 20,
+        "listen_budget_seconds": 4,
+    },
+    "edit": {
+        "engine_cache_ttl": 20,
+        # How long a saved model snapshot stays valid across processes. CLI calls
+        # are separate processes, so this is what keeps discovery off the hot path.
+        "snapshot_cache_ttl": 120,
+        # Which families may edit, best first. "qwen-image" is the weakest one:
+        # it is an img2img reference model, it cannot honour a mask.
+        "priority": ["qwen-image-edit", "flux2-klein", "qwen-image"],
+        # Never switch models just to climb the priority list: an already loaded
+        # model wins, because a switch costs 30-60 s (4B) or minutes (20B) and
+        # may run out of VRAM.
+        "prefer_loaded": True,
+        # Load the best model automatically when none of the editable families
+        # is loaded -- otherwise the priority list would be decorative.
+        "auto_load": True,
+        "auto_load_timeout": 240,
+        # auto = try /sdcpp/v1/img_gen, fall back to /sdapi/v1/img2img.
+        "channel": "auto",
+        "strength": 0.75,
+        "redraw_strength": 0.6,
+        "timeout": 900,
+        "mask_blur": 8,
+        "inpaint_padding": 32,
+        "verify": "agent",
+        # Where to look for model files (in addition to what the engine reports).
+        "models_dirs": [],
+        "load_endpoint": None,
+        "resolved_channel": None,
+    },
 }
 
 CONFIG_PATH = Path(
@@ -277,39 +316,77 @@ def _run(cmd: list[str], timeout: int = 20) -> str:
         return ""
 
 
-def port_from_process(cfg: dict) -> list[int]:
-    """Parse ``--listen-port`` / ``--port`` from running engine processes."""
-    names = [n.lower() for n in cfg_get(cfg, "engine.process_names", [])]
-    ports: list[int] = []
-    texts: list[str] = []
+_PROC_CACHE = {"stamp": 0.0, "key": "", "text": ""}
 
+def _engine_process_exists(names: list[str]) -> bool:
+    """Cheap pre-check: is any engine process running at all?
+
+    Reading command lines costs one PowerShell start (~8 s on a managed machine),
+    while listing process names costs a fraction of a second. When no engine is
+    running there is nothing to parse, so skip the expensive half entirely.
+    """
+    try:
+        out = _run(["tasklist", "/NH", "/FO", "CSV"], timeout=8)
+    except Exception:
+        return True
+    low = (out or "").lower()
+    if not low.strip():
+        return True  # cannot tell -> let the precise path decide
+    return any(n in low for n in names)
+
+
+def _process_cmdlines(cfg: dict, force: bool = False) -> str:
+    """Command lines of processes whose name looks like the engine.
+
+    On Windows this is *one* PowerShell call for all configured names: launching
+    PowerShell once per name costs several seconds each on managed machines,
+    which used to make a cold discovery take tens of seconds for nothing.
+    """
+    try:
+        ttl = float(cfg_get(cfg, "discover.process_cache_ttl", 20))
+    except (TypeError, ValueError):
+        ttl = 20.0
+    names = [str(n).lower() for n in cfg_get(cfg, "engine.process_names", [])]
+    key = "|".join(names)
+    now = time.monotonic()
+    if (not force and _PROC_CACHE["key"] == key and _PROC_CACHE["stamp"]
+            and now - _PROC_CACHE["stamp"] < ttl):
+        return _PROC_CACHE["text"]
     if os.name == "nt":
-        for name in {n for n in names}:
-            ps = (
-                "Get-CimInstance Win32_Process -Filter \"Name='{0}'\" | "
-                "Select-Object -ExpandProperty CommandLine"
-            ).format(name)
-            out = _run(["powershell", "-NoProfile", "-NonInteractive", "-Command", ps])
-            texts.extend(out.splitlines())
+        if not _engine_process_exists(names):
+            _PROC_CACHE.update(stamp=now, key=key, text="")
+            return ""
+        quoted = ",".join("'{0}'".format(n.replace("'", "''")) for n in names)
+        script = ("$n=@({0}); Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | "
+                  "Where-Object {{ $n -contains $_.Name.ToLower() }} | "
+                  "Select-Object -ExpandProperty CommandLine").format(quoted)
+        text = _run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script], timeout=8)
     else:
-        # macOS / Linux: single ps pass, filter by process name
-        out = _run(["ps", "-axo", "command="])
-        for line in out.splitlines():
-            low = line.lower()
-            if any(n in low for n in names):
-                texts.append(line)
-        # Linux: /proc/*/cmdline is more reliable when ps output is truncated
+        text = _run(["ps", "-axo", "command="], timeout=12)
         proc = Path("/proc")
         if proc.is_dir():
+            extra = []
             for entry in proc.glob("[0-9]*/cmdline"):
                 try:
                     raw = entry.read_bytes().replace(b"\x00", b" ").decode("utf-8", "replace")
                 except Exception:
                     continue
-                low = raw.lower()
-                if any(n in low for n in names):
-                    texts.append(raw)
+                extra.append(raw)
+            text = "\n".join([text] + extra)
+    _PROC_CACHE.update(stamp=now, key=key, text=text or "")
+    return _PROC_CACHE["text"]
 
+
+def port_from_process(cfg: dict) -> list[int]:
+    names = [str(n).lower() for n in cfg_get(cfg, "engine.process_names", [])]
+    ports: list[int] = []
+    texts: list[str] = []
+    for line in _process_cmdlines(cfg).splitlines():
+        if not line.strip():
+            continue
+        if os.name != "nt" and not any(n in line.lower() for n in names):
+            continue
+        texts.append(line)
     for line in texts:
         for flag in ("--listen-port", "-p", "--port"):
             for m in re.finditer(rf"{re.escape(flag)}[\s=]+(\d{{2,5}})", line):
@@ -335,6 +412,47 @@ def _local_listen_ports() -> list[int]:
             if m:
                 ports.add(int(m.group(1)))
     return sorted(ports)
+
+
+def _probe_first(cfg: dict, ports: list[int], budget: float) -> int | None:
+    """Probe ports concurrently; return the first responder in the given order.
+
+    A connect that is dropped rather than refused costs the full probe timeout on
+    hardened machines, so probing 20 candidates serially took half a minute.
+    Eight at a time keeps the semantics (order decides the winner) and cuts the
+    wall clock.
+    """
+    ports = [int(p) for p in ports]
+    if not ports:
+        return None
+    host = cfg_get(cfg, "host", "127.0.0.1")
+    deadline = time.monotonic() + max(1.0, float(budget))
+    hits: list[int] = []
+    lock = threading.Lock()
+
+    def work(port: int) -> None:
+        try:
+            if probe(f"http://{host}:{port}", cfg):
+                with lock:
+                    hits.append(port)
+        except Exception:
+            return
+
+    batch = 16
+    for i in range(0, len(ports), batch):
+        chunk = ports[i:i + batch]
+        threads = [threading.Thread(target=work, args=(p,), daemon=True) for p in chunk]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=max(0.05, deadline - time.monotonic()))
+        if hits:
+            with lock:
+                return min(hits, key=ports.index)
+        if time.monotonic() >= deadline:
+            LOG.debug("discovery budget exhausted while probing candidates")
+            break
+    return None
 
 
 def discover(cfg: dict, force: bool = False) -> tuple[int | None, str]:
@@ -366,19 +484,33 @@ def discover(cfg: dict, force: bool = False) -> tuple[int | None, str]:
             _remember_port(cfg, p)
             return p, "process"
 
+    try:
+        budget = float(cfg_get(cfg, "discover.budget_seconds", 20))
+    except (TypeError, ValueError):
+        budget = 20.0
+    deadline = time.monotonic() + max(2.0, budget)
+    # netstat already told us what actually listens, so a candidate port that is
+    # not in that list cannot answer. Probe the intersection first: with an engine
+    # running this hits on the first try instead of after a full sweep.
+    listening = _local_listen_ports()
+    listening_set = set(listening)
     candidates = [p for p in cfg_get(cfg, "port_candidates", []) if p not in seen]
-    for p in candidates:
-        if probe(f"http://{host}:{p}", cfg):
-            _remember_port(cfg, p)
-            return p, "candidate"
-
-    for p in _local_listen_ports():
-        if p in seen or p in candidates:
-            continue
-        if probe(f"http://{host}:{p}", cfg):
-            _remember_port(cfg, p)
-            return p, "listen_scan"
-
+    live = [p for p in candidates if p in listening_set] if listening_set else candidates
+    hit = _probe_first(cfg, live, max(1.0, deadline - time.monotonic()))
+    if hit is not None:
+        _remember_port(cfg, hit)
+        return hit, "candidate"
+    try:
+        listen_budget = float(cfg_get(cfg, "discover.listen_budget_seconds", 4))
+    except (TypeError, ValueError):
+        listen_budget = 4.0
+    if not listening:
+        listening = _local_listen_ports()
+    leftovers = [p for p in listening if p not in seen and p not in candidates]
+    hit = _probe_first(cfg, leftovers, min(listen_budget, max(1.0, deadline - time.monotonic())))
+    if hit is not None:
+        _remember_port(cfg, hit)
+        return hit, "listen_scan"
     return None, "not_found"
 
 
@@ -993,6 +1125,56 @@ def main(argv: list[str] | None = None) -> int:
     g.add_argument("--no-guard", action="store_true", help="disable min-area / max-edge guard")
     g.add_argument("--dry-run", action="store_true", help="print the payload without generating")
 
+    e = sub.add_parser("edit", help="repaint only a masked area of an existing image")
+    e.add_argument("--image", required=True, help="image to modify")
+    e.add_argument("--prompt", required=True, help="what should appear inside the mask")
+    e.add_argument("--mask", help="mask PNG (white = repaint)")
+    e.add_argument("--region", action="append", metavar="x1,y1,x2,y2",
+                   help="rect region; repeatable. Ignored when --mask is given")
+    e.add_argument("--unit", choices=["norm", "px"], default="norm",
+                   help="region coordinates: norm (0..1, default) or px")
+    e.add_argument("--invert", action="store_true", help="invert the generated mask")
+    e.add_argument("--strength", type=float, help="denoising strength (default 0.75)")
+    e.add_argument("--negative", default="")
+    e.add_argument("--model")
+    e.add_argument("--steps", type=int)
+    e.add_argument("--sampler")
+    e.add_argument("--cfg", type=float, dest="cfg_scale")
+    e.add_argument("--seed", type=int, default=-1)
+    e.add_argument("--mask-blur", type=int, dest="mask_blur")
+    e.add_argument("--padding", type=int, dest="inpaint_padding")
+    e.add_argument("--channel", choices=["auto", "img_gen", "img2img"])
+    e.add_argument("--out", dest="out_dir")
+    e.add_argument("--prefix", default="locmodel-edit")
+    e.add_argument("--timeout", type=int)
+    e.add_argument("--verify", choices=["agent", "off"])
+    e.add_argument("--dry-run", action="store_true")
+
+    r = sub.add_parser("redraw", help="re-draw the whole image from a new prompt")
+    r.add_argument("--image", required=True)
+    r.add_argument("--prompt", required=True)
+    r.add_argument("--strength", type=float, help="denoising strength (default 0.6)")
+    r.add_argument("--negative", default="")
+    r.add_argument("--model")
+    r.add_argument("--steps", type=int)
+    r.add_argument("--sampler")
+    r.add_argument("--cfg", type=float, dest="cfg_scale")
+    r.add_argument("--seed", type=int, default=-1)
+    r.add_argument("--channel", choices=["auto", "img_gen", "img2img"])
+    r.add_argument("--out", dest="out_dir")
+    r.add_argument("--prefix", default="locmodel-redraw")
+    r.add_argument("--timeout", type=int)
+    r.add_argument("--verify", choices=["agent", "off"])
+    r.add_argument("--dry-run", action="store_true")
+
+    em = sub.add_parser("edit-models", help="models that can edit, with priority and auto pick")
+    em.add_argument("--refresh", action="store_true",
+                    help="ignore the cached model snapshot and probe the engine again")
+
+    lm = sub.add_parser("load-model", help="load / switch the model in the engine")
+    lm.add_argument("model", help="model name or filename")
+    lm.add_argument("--timeout", type=int, default=240)
+
     c = sub.add_parser("config", help="show or modify configuration")
     c.add_argument("action", choices=["show", "get", "set", "path"])
     c.add_argument("key", nargs="?")
@@ -1040,6 +1222,41 @@ def main(argv: list[str] | None = None) -> int:
             )
             _emit(res)
             return 0 if res.get("ok") else _EXIT["generation_failed"]
+        elif args.cmd in ("edit", "redraw", "edit-models", "load-model"):
+            import locmodel_edit as ed  # local import: locmodel_edit imports this module
+            if args.cmd == "edit-models":
+                _emit(ed.list_models(cfg, refresh=getattr(args, "refresh", False)))
+            elif args.cmd == "load-model":
+                _emit(ed.load_model(cfg, args.model, timeout=args.timeout))
+            else:
+                common = dict(
+                    negative_prompt=args.negative, model=args.model, steps=args.steps,
+                    sampler=args.sampler, cfg_scale=args.cfg_scale, seed=args.seed,
+                    channel=args.channel, out_dir=args.out_dir,
+                    filename_prefix=args.prefix, timeout=args.timeout,
+                    verify=args.verify, strength=args.strength, dry_run=args.dry_run,
+                )
+                if args.cmd == "edit":
+                    regions = None
+                    if args.region:
+                        boxes = []
+                        for raw in args.region:
+                            nums = [float(v) for v in re.split(r"[,\s]+", raw.strip()) if v]
+                            if len(nums) != 4:
+                                raise BridgeError(
+                                    f'--region needs 4 numbers, got "{raw}"', "bad_arguments")
+                            boxes.append({"type": "rect", "x": nums})
+                        regions = {"unit": args.unit, "boxes": boxes,
+                                   "invert": bool(args.invert)}
+                    res = ed.edit_image(args.image, args.prompt, cfg,
+                                        mask_image=args.mask, regions=regions,
+                                        mask_blur=args.mask_blur,
+                                        inpaint_padding=args.inpaint_padding,
+                                        **common)
+                else:
+                    res = ed.redraw_image(args.image, args.prompt, cfg, **common)
+                _emit(res)
+                return 0 if res.get("ok") else _EXIT["generation_failed"]
         elif args.cmd == "config":
             if args.action == "path":
                 _emit({"path": str(active_config_path()), "exists": active_config_path().exists()})
@@ -1062,6 +1279,11 @@ def main(argv: list[str] | None = None) -> int:
         _emit({"ok": False, "error": exc.code, "message": str(exc), "hint": exc.hint})
         return _EXIT.get(exc.code, 1)
     except Exception as exc:  # pragma: no cover
+        code = getattr(exc, "code", None)
+        if code:  # EditError and friends carry a machine-readable code
+            _emit({"ok": False, "error": code, "message": str(exc),
+                   "hint": getattr(exc, "hint", "")})
+            return _EXIT.get(code, 1)
         _emit({"ok": False, "error": type(exc).__name__, "message": str(exc)})
         return _EXIT["generic_error"]
     return 0

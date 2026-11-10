@@ -334,7 +334,7 @@ def main() -> int:
 
     passed = sum(1 for r in RESULTS if r["ok"])
     total = len(RESULTS)
-    report = {"version": "2.0.0", "python": PY, "out_dir": str(out_dir),
+    report = {"version": "3.0.0", "python": PY, "out_dir": str(out_dir),
               "passed": passed, "total": total,
               "failed": [r["case"] for r in RESULTS if not r["ok"]],
               "cases": RESULTS}

@@ -1,3 +1,14 @@
+---
+AIGC:
+    Label: "1"
+    ContentProducer: 001191440300708461136T1XGW3
+    ProduceID: 798659b1f59514cb753b383c1f423b09_f8cd7547dc4211f1a0ca525400de85a5
+    ReservedCode1: JI/K2rVcmXWVNYzyqXQ37kbegmv2HTC+OgAW3p+atPMmQJluy6CMUZhgWZ96tzLr6uQPay02A1ABzkewcrVl24xUCJ7TBkpNa9knyxIIZipzhw+01bKSaHYNVGoJrOaJV5/ouflnFhJX0hNW7p86B8E1d/U+4BUbSxMr1dDkRaFwUFzDraO7949RL9c=
+    ContentPropagator: 001191440300708461136T1XGW3
+    PropagateID: 798659b1f59514cb753b383c1f423b09_f8cd7547dc4211f1a0ca525400de85a5
+    ReservedCode2: JI/K2rVcmXWVNYzyqXQ37kbegmv2HTC+OgAW3p+atPMmQJluy6CMUZhgWZ96tzLr6uQPay02A1ABzkewcrVl24xUCJ7TBkpNa9knyxIIZipzhw+01bKSaHYNVGoJrOaJV5/ouflnFhJX0hNW7p86B8E1d/U+4BUbSxMr1dDkRaFwUFzDraO7949RL9c=
+---
+
 # locmodel-image 安装器
 
 一键把 `locmodel-image` 的 MCP 服务与 Skill 部署到目标机。目标机**不需要 Python**：
@@ -68,3 +79,4 @@ build/dist/locmodel-image-setup.exe
 
 - 真实出图需要本机 LocModel 引擎在线（`sd-server.exe` 监听中）。安装器 `doctor` 会检查引擎、模型、显存与输出目录，引擎不在时报“引擎未就绪”，不影响 MCP 注册本身。
 - Marvis 的注册走对话指令，安装器只负责生成指令文本。
+*（内容由AI生成，仅供参考）*

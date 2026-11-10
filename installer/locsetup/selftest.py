@@ -140,7 +140,7 @@ def mcp_smoke(command: list[str], cwd: Path | None = None, env: dict | None = No
         init = sess.call("initialize", {
             "protocolVersion": "2024-11-05",
             "capabilities": {},
-            "clientInfo": {"name": "locmodel-image-setup", "version": "2.0.0"},
+            "clientInfo": {"name": "locmodel-image-setup", "version": "3.0.0"},
         })
         if "error" in init:
             add("mcp.initialize", False, json.dumps(init["error"], ensure_ascii=False))

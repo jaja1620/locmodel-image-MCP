@@ -1,0 +1,476 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>LocModel 局部重绘标注器</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; font: 14px/1.5 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+    background: #14161a; color: #e6e8ec; display: flex; flex-direction: column; height: 100vh;
+  }
+  header {
+    display: flex; align-items: center; gap: 10px; padding: 10px 14px;
+    border-bottom: 1px solid #262a31; background: #1a1d22; flex-wrap: wrap;
+  }
+  h1 { font-size: 14px; font-weight: 600; margin: 0 10px 0 0; letter-spacing: .3px; }
+  button, label.btn {
+    background: #262a31; color: #e6e8ec; border: 1px solid #333945; border-radius: 6px;
+    padding: 6px 11px; font-size: 13px; cursor: pointer; user-select: none;
+  }
+  button:hover, label.btn:hover { background: #2f3540; }
+  button.on { background: #2f6fed; border-color: #2f6fed; color: #fff; }
+  button:disabled { opacity: .45; cursor: default; }
+  input[type=range] { width: 110px; vertical-align: middle; }
+  .spacer { flex: 1; }
+  main { flex: 1; display: flex; min-height: 0; }
+  #stage {
+    flex: 1; display: flex; align-items: center; justify-content: center;
+    overflow: auto; padding: 16px; background:
+      repeating-conic-gradient(#1b1e24 0% 25%, #171a1f 0% 50%) 50% / 24px 24px;
+  }
+  #wrap { position: relative; line-height: 0; box-shadow: 0 8px 28px rgba(0,0,0,.55); }
+  #base, #overlay { display: block; max-width: none; }
+  #overlay { position: absolute; inset: 0; cursor: crosshair; }
+  aside {
+    width: 300px; border-left: 1px solid #262a31; background: #1a1d22;
+    padding: 14px; overflow: auto; display: flex; flex-direction: column; gap: 12px;
+  }
+  aside h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .8px;
+    color: #8b93a3; margin: 0; font-weight: 600; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; }
+  button.full { width: 100%; }
+  textarea {
+    width: 100%; height: 150px; background: #12151a; color: #a9e1b0; border: 1px solid #2c313b;
+    border-radius: 6px; padding: 8px; font: 12px/1.45 Consolas, monospace; resize: vertical;
+  }
+  .hint { color: #8b93a3; font-size: 12px; }
+  .warn { color: #f0b429; }
+  #drop {
+    position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+    flex-direction: column; gap: 8px; color: #8b93a3; text-align: center; padding: 24px;
+    border: 2px dashed #333945; border-radius: 10px; margin: 16px;
+  }
+  #drop.hide { display: none; }
+  #drop strong { color: #cfd4dd; font-size: 15px; }
+  .chip { border: 1px solid #333945; border-radius: 999px; padding: 2px 9px; font-size: 12px; color: #a8b0bd; }
+</style>
+</head>
+<body>
+<header>
+  <h1>LocModel 局部重绘标注器</h1>
+  <label class="btn">打开图片<input id="file" type="file" accept="image/*" hidden></label>
+  <button id="toolRect" class="on" title="拖拽画矩形 (R)">矩形</button>
+  <button id="toolPoly" title="逐点点击，双击或回车闭合 (P)">多边形</button>
+  <button id="toolBrush" title="按住涂抹，适合不规则区域 (B)">画笔</button>
+  <label class="hint">笔刷 <input id="brush" type="range" min="8" max="120" value="36"><span id="brushVal">36</span></label>
+  <button id="undo" title="Ctrl+Z">撤销</button>
+  <button id="clear">清空</button>
+  <div class="spacer"></div>
+  <span class="chip" id="status">等待图片</span>
+</header>
+
+<main>
+  <div id="stage">
+    <div id="wrap">
+      <canvas id="base"></canvas>
+      <canvas id="overlay"></canvas>
+    </div>
+    <div id="drop">
+      <strong>把图片拖到这里</strong>
+      <span>或点击左上角“打开图片”<br>画好区域后导出掩码 PNG，交给 edit_image 使用</span>
+    </div>
+  </div>
+  <aside>
+    <h2>1. 画要重绘的区域</h2>
+    <div class="hint">红色半透明部分会被重绘，其余像素由工具在 CPU 侧还原为原图，不会被改动。</div>
+
+    <h2>2. 导出掩码</h2>
+    <button id="saveMask" class="full" disabled>下载掩码 PNG（白=重绘）</button>
+    <div class="hint" id="maskNote">文件名建议 <code>mask.png</code>，与图片同尺寸。</div>
+
+    <h2>3. 或复制坐标 JSON</h2>
+    <textarea id="json" readonly spellcheck="false" placeholder="画完矩形/多边形后自动生成"></textarea>
+    <div class="row">
+      <button id="copyJson" disabled>复制 JSON</button>
+      <button id="copyCli" disabled>复制 CLI 命令</button>
+    </div>
+    <div class="hint">画笔轨迹无法用坐标表达，只能用导出的掩码 PNG。矩形/多边形可直接用 JSON，坐标已归一化到 0–1。</div>
+    <div class="hint warn" id="warn"></div>
+  </aside>
+</main>
+
+<script>
+"use strict";
+
+const baseCv = document.getElementById("base");
+const overCv = document.getElementById("overlay");
+const bctx = baseCv.getContext("2d");
+const octx = overCv.getContext("2d");
+
+const state = {
+  img: null,
+  tool: "rect",
+  shapes: [],          // {type:'rect'|'poly'|'brush', ...} in image pixel space
+  draft: null,
+  brushSize: 36,
+  scale: 1
+};
+
+const RED = "rgba(239,68,68,.45)";
+const RED_EDGE = "#ef4444";
+
+/* ---------------- loading ---------------- */
+
+function loadImage(file) {
+  const url = URL.createObjectURL(file);
+  const img = new Image();
+  img.onload = () => {
+    URL.revokeObjectURL(url);
+    state.img = img;
+    state.shapes = [];
+    state.draft = null;
+    baseCv.width = overCv.width = img.naturalWidth;
+    baseCv.height = overCv.height = img.naturalHeight;
+    // Fit to viewport, but never upscale beyond 100%.
+    const box = document.getElementById("stage").getBoundingClientRect();
+    const fit = Math.min((box.width - 48) / img.naturalWidth, (box.height - 48) / img.naturalHeight, 1);
+    state.scale = Math.max(fit, 0.05);
+    for (const cv of [baseCv, overCv]) {
+      cv.style.width = Math.round(img.naturalWidth * state.scale) + "px";
+      cv.style.height = Math.round(img.naturalHeight * state.scale) + "px";
+    }
+    bctx.clearRect(0, 0, baseCv.width, baseCv.height);
+    bctx.drawImage(img, 0, 0);
+    document.getElementById("drop").classList.add("hide");
+    document.getElementById("saveMask").disabled = false;
+    paint();
+    updateStatus();
+  };
+  img.onerror = () => { document.getElementById("warn").textContent = "这张图片无法读取，换一张试试。"; };
+  img.src = url;
+}
+
+document.getElementById("file").addEventListener("change", (e) => {
+  if (e.target.files && e.target.files[0]) loadImage(e.target.files[0]);
+});
+
+for (const ev of ["dragenter", "dragover"]) {
+  document.addEventListener(ev, (e) => { e.preventDefault(); });
+}
+document.addEventListener("drop", (e) => {
+  e.preventDefault();
+  const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+  if (f && f.type.startsWith("image/")) loadImage(f);
+});
+
+window.addEventListener("paste", (e) => {
+  for (const item of e.clipboardData.items) {
+    if (item.type.startsWith("image/")) { loadImage(item.getAsFile()); break; }
+  }
+});
+
+/* ---------------- drawing helpers ---------------- */
+
+function toImage(e) {
+  const r = overCv.getBoundingClientRect();
+  return {
+    x: (e.clientX - r.left) / state.scale,
+    y: (e.clientY - r.top) / state.scale
+  };
+}
+
+function clampToImage(p) {
+  return {
+    x: Math.max(0, Math.min(baseCv.width, p.x)),
+    y: Math.max(0, Math.min(baseCv.height, p.y))
+  };
+}
+
+function paintShape(ctx, s, width, height) {
+  ctx.fillStyle = RED;
+  ctx.strokeStyle = RED_EDGE;
+  ctx.lineWidth = Math.max(1, 1.5 / state.scale);
+  if (s.type === "rect") {
+    const x = Math.min(s.x0, s.x1), y = Math.min(s.y0, s.y1);
+    const w = Math.abs(s.x1 - s.x0), h = Math.abs(s.y1 - s.y0);
+    ctx.fillRect(x, y, w, h);
+    ctx.strokeRect(x, y, w, h);
+  } else if (s.type === "poly") {
+    const pts = s.points;
+    if (pts.length > 1) {
+      ctx.beginPath();
+      ctx.moveTo(pts[0].x, pts[0].y);
+      for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+      if (s.closed) { ctx.closePath(); ctx.fill(); }
+      ctx.stroke();
+    }
+    ctx.fillStyle = RED_EDGE;
+    for (const p of pts) ctx.fillRect(p.x - 2, p.y - 2, 4, 4);
+  } else if (s.type === "brush") {
+    ctx.strokeStyle = RED;
+    ctx.lineWidth = s.size;
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    ctx.beginPath();
+    const pts = s.points;
+    if (pts.length === 1) {
+      ctx.arc(pts[0].x, pts[0].y, s.size / 2, 0, Math.PI * 2);
+      ctx.fillStyle = RED;
+      ctx.fill();
+    } else {
+      ctx.moveTo(pts[0].x, pts[0].y);
+      for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+      ctx.stroke();
+    }
+  }
+}
+
+function paint() {
+  octx.clearRect(0, 0, overCv.width, overCv.height);
+  for (const s of state.shapes) paintShape(octx, s, overCv.width, overCv.height);
+  if (state.draft) paintShape(octx, state.draft, overCv.width, overCv.height);
+  updateJson();
+}
+
+/* ---------------- interaction ---------------- */
+
+let dragging = false;
+
+overCv.addEventListener("pointerdown", (e) => {
+  if (!state.img) return;
+  overCv.setPointerCapture(e.pointerId);
+  const p = clampToImage(toImage(e));
+  if (state.tool === "rect") {
+    state.draft = { type: "rect", x0: p.x, y0: p.y, x1: p.x, y1: p.y };
+    dragging = true;
+  } else if (state.tool === "brush") {
+    state.draft = { type: "brush", size: state.brushSize / state.scale, points: [p] };
+    dragging = true;
+  } else {
+    if (!state.draft) state.draft = { type: "poly", points: [], closed: false };
+    state.draft.points.push(p);
+  }
+  paint();
+  updateStatus();
+});
+
+overCv.addEventListener("pointermove", (e) => {
+  if (!state.img || !dragging || !state.draft) return;
+  const p = clampToImage(toImage(e));
+  if (state.draft.type === "rect") { state.draft.x1 = p.x; state.draft.y1 = p.y; }
+  if (state.draft.type === "brush") state.draft.points.push(p);
+  paint();
+});
+
+overCv.addEventListener("pointerup", (e) => {
+  if (!state.img) return;
+  if (state.draft && dragging) {
+    const d = state.draft;
+    const keep = d.type === "rect"
+      ? Math.abs(d.x1 - d.x0) > 2 && Math.abs(d.y1 - d.y0) > 2
+      : d.points.length > 1;
+    if (keep) state.shapes.push(d);
+    state.draft = null;
+    dragging = false;
+    paint();
+    updateStatus();
+  }
+});
+
+overCv.addEventListener("dblclick", (e) => {
+  if (state.draft && state.draft.type === "poly") { e.preventDefault(); closePoly(); }
+});
+
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && state.draft && state.draft.type === "poly") closePoly();
+  if (e.key === "Escape") { state.draft = null; paint(); }
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") { e.preventDefault(); undo(); }
+  if (e.key.toLowerCase() === "r") setTool("rect");
+  if (e.key.toLowerCase() === "p") setTool("poly");
+  if (e.key.toLowerCase() === "b") setTool("brush");
+});
+
+function closePoly() {
+  const d = state.draft;
+  if (d && d.type === "poly") {
+    if (d.points.length >= 3) { d.closed = true; state.shapes.push(d); }
+    state.draft = null;
+    paint();
+    updateStatus();
+  }
+}
+
+function undo() {
+  if (state.draft) { state.draft = null; } else { state.shapes.pop(); }
+  paint();
+  updateStatus();
+}
+
+function setTool(t) {
+  state.tool = t;
+  state.draft = null;
+  for (const [id, val] of [["toolRect", "rect"], ["toolPoly", "poly"], ["toolBrush", "brush"]]) {
+    document.getElementById(id).classList.toggle("on", val === t);
+  }
+  overCv.style.cursor = t === "rect" ? "crosshair" : t === "brush" ? "cell" : "copy";
+  paint();
+}
+
+document.getElementById("toolRect").onclick = () => setTool("rect");
+document.getElementById("toolPoly").onclick = () => setTool("poly");
+document.getElementById("toolBrush").onclick = () => setTool("brush");
+document.getElementById("undo").onclick = undo;
+document.getElementById("clear").onclick = () => {
+  state.shapes = []; state.draft = null; paint(); updateStatus();
+};
+document.getElementById("brush").oninput = (e) => {
+  state.brushSize = Number(e.target.value);
+  document.getElementById("brushVal").textContent = state.brushSize;
+};
+
+/* ---------------- export ---------------- */
+
+function norm(v, total) { return Math.round((v / total) * 1e5) / 1e5; }
+
+function regionsJson() {
+  const W = baseCv.width, H = baseCv.height;
+  const regions = [];
+  for (const s of state.shapes) {
+    if (s.type === "rect") {
+      const x = Math.min(s.x0, s.x1), y = Math.min(s.y0, s.y1);
+      const w = Math.abs(s.x1 - s.x0), h = Math.abs(s.y1 - s.y0);
+      regions.push({ type: "rect", x: [norm(x, W), norm(y, H), norm(x + w, W), norm(y + h, H)] });
+    } else if (s.type === "poly" && s.closed) {
+      regions.push({ type: "polygon", points: s.points.map((p) => [norm(p.x, W), norm(p.y, H)]) });
+    }
+  }
+  return regions;
+}
+
+function updateJson() {
+  const ta = document.getElementById("json");
+  const copyBtn = document.getElementById("copyJson");
+  const cliBtn = document.getElementById("copyCli");
+  const warn = document.getElementById("warn");
+  if (!state.img) { ta.value = ""; copyBtn.disabled = cliBtn.disabled = true; return; }
+
+  const regions = regionsJson();
+  const hasBrush = state.shapes.some((s) => s.type === "brush");
+  if (regions.length) {
+    ta.value = JSON.stringify({ unit: "norm", regions }, null, 2);
+    copyBtn.disabled = cliBtn.disabled = false;
+  } else {
+    ta.value = hasBrush ? "（画笔轨迹只能导出掩码 PNG）" : "";
+    copyBtn.disabled = cliBtn.disabled = true;
+  }
+  warn.textContent = hasBrush && regions.length
+    ? "画笔轨迹未包含在 JSON 里，请用掩码 PNG。"
+    : hasBrush ? "画笔轨迹只能用掩码 PNG。" : "";
+  ta.dataset.cli = regions.length
+    ? `locmodel-image edit --image "<图片路径>" --prompt "<要画成什么>" --mask "<mask.png 路径>"` : "";
+}
+
+function updateStatus() {
+  const el = document.getElementById("status");
+  if (!state.img) { el.textContent = "等待图片"; return; }
+  const n = state.shapes.length;
+  el.textContent = `${baseCv.width}×${baseCv.height} · ${n} 个区域`;
+}
+
+document.getElementById("saveMask").onclick = () => {
+  if (!state.img) return;
+  const W = baseCv.width, H = baseCv.height;
+  const cv = document.createElement("canvas");
+  cv.width = W; cv.height = H;
+  const ctx = cv.getContext("2d");
+  ctx.fillStyle = "#000";
+  ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = "#fff";
+  ctx.strokeStyle = "#fff";
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  for (const s of state.shapes) {
+    if (s.type === "rect") {
+      const x = Math.min(s.x0, s.x1), y = Math.min(s.y0, s.y1);
+      ctx.fillRect(x, y, Math.abs(s.x1 - s.x0), Math.abs(s.y1 - s.y0));
+    } else if (s.type === "poly" && s.closed) {
+      ctx.beginPath();
+      ctx.moveTo(s.points[0].x, s.points[0].y);
+      for (let i = 1; i < s.points.length; i++) ctx.lineTo(s.points[i].x, s.points[i].y);
+      ctx.closePath();
+      ctx.fill();
+    } else if (s.type === "brush") {
+      ctx.lineWidth = s.size;
+      ctx.beginPath();
+      if (s.points.length === 1) {
+        ctx.arc(s.points[0].x, s.points[0].y, s.size / 2, 0, Math.PI * 2);
+        ctx.fill();
+      } else {
+        ctx.moveTo(s.points[0].x, s.points[0].y);
+        for (let i = 1; i < s.points.length; i++) ctx.lineTo(s.points[i].x, s.points[i].y);
+        ctx.stroke();
+      }
+    }
+  }
+  cv.toBlob((blob) => {
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "mask.png";
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+  }, "image/png");
+};
+
+function copy(text, btn) {
+  const done = () => {
+    const old = btn.textContent;
+    btn.textContent = "已复制";
+    setTimeout(() => { btn.textContent = old; }, 1200);
+  };
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(done, () => fallback());
+  } else fallback();
+
+  function fallback() {
+    const ta = document.getElementById("json");
+    ta.removeAttribute("readonly");
+    const sel = ta.value;
+    ta.value = text;
+    ta.select();
+    document.execCommand("copy");
+    ta.value = sel;
+    ta.setAttribute("readonly", "readonly");
+    done();
+  }
+}
+
+document.getElementById("copyJson").onclick = (e) =>
+  copy(document.getElementById("json").value, e.currentTarget);
+document.getElementById("copyCli").onclick = (e) =>
+  copy(document.getElementById("json").dataset.cli || "", e.currentTarget);
+
+/* Rescale when the window resizes. */
+let resizeTimer = null;
+window.addEventListener("resize", () => {
+  if (!state.img) return;
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(() => {
+    const box = document.getElementById("stage").getBoundingClientRect();
+    const fit = Math.min((box.width - 48) / state.img.naturalWidth,
+                         (box.height - 48) / state.img.naturalHeight, 1);
+    state.scale = Math.max(fit, 0.05);
+    for (const cv of [baseCv, overCv]) {
+      cv.style.width = Math.round(state.img.naturalWidth * state.scale) + "px";
+      cv.style.height = Math.round(state.img.naturalHeight * state.scale) + "px";
+    }
+    paint();
+  }, 120);
+});
+
+setTool("rect");
+paint();
+</script>
+</body>
+</html>

@@ -4,6 +4,72 @@ All notable changes to this project are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows [Semantic Versioning](https://semver.org/).
 
+## [3.0.0] — 2026-11-10
+
+Image editing on top of text-to-image. No new model download, no new dependency: the engine's
+existing `init_image` / `mask_image` path is driven from the CLI and MCP, and every mask is built
+on the CPU with the standard library.
+
+### Added
+
+- `edit_image` (MCP) / `edit` (CLI) — repaint only a masked region of an existing image
+- `redraw_image` (MCP) / `redraw` (CLI) — re-draw a whole image from a new prompt, keeping the
+  source as a structural reference
+- `list_edit_models` (MCP) / `edit-models` (CLI) — models with family, rank, region-editing
+  capability, and the automatic pick, plus actionable `notes` when nothing is installed
+- `load_model` (MCP) / `load-model` (CLI) — load or switch the engine model and verify the switch
+  by re-reading the current model
+- Three mask sources: a mask PNG (white = repaint), normalised/absolute rectangles and polygons,
+  or a colour threshold; `brush` and `circle` shapes are accepted too
+- CPU-side recomposition — `result = where(mask > 127, edited, original)` — so pixels outside the
+  mask are byte-identical to the source; `protected_pixels` / `redrawn_pixels` are reported
+- `annotator/mask_annotator.html` — single-file browser mask painter (rectangle / polygon /
+  brush) that exports a mask PNG or normalised JSON
+- Engine channel negotiation: `edit.channel = auto` tries the asynchronous `img_gen` endpoint and
+  falls back to the synchronous `img2img` one, remembering the winner in
+  `edit.resolved_channel`
+- Output verification (`edit.verify`) that re-reads produced files and reports dimensions
+
+### Changed
+
+- `edit.priority` orders edit candidates (`qwen-image-edit` → `flux2-klein` → `qwen-image`);
+  a model requested by name is used **exactly** or rejected with the candidate list, never
+  silently substituted
+- `edit.prefer_loaded` (default `true`): an already-loaded editable model is kept instead of
+  swapping to a higher-priority one, because a swap costs 30–60 s for a 4B model and can exhaust
+  VRAM
+- `edit.auto_load` (default `true`): load the best editable model when none is loaded, with a
+  timeout and a read-back check
+- Model families are matched together rather than first-pattern-wins, so `Qwen-Image-Edit` can
+  never be mistaken for plain `Qwen-Image` even under a reordered priority list
+- Engine probing was the slowest thing in the tool (190 s on a managed Windows box with no
+  engine running) and is now bounded from four sides: `tasklist` decides whether any engine
+  process exists before PowerShell is started to read command lines, process command lines are
+  memoised for `discover.process_cache_ttl` seconds, `netstat` listeners are used to skip
+  candidate ports that cannot answer, and a single snapshot does one `base_url()` probe instead
+  of one per query. A cold call is ~6 s, a warm one ~0.3 s (was 190 s / 190 s)
+- The model snapshot is persisted to `edit_snapshot.json` next to the config and reused for
+  `edit.snapshot_cache_ttl` seconds (default 120), so separate CLI processes do not re-probe;
+  `edit-models --refresh` (or `list_edit_models(..., refresh=true)`) forces a fresh probe, and a
+  successful `load_model` invalidates the snapshot
+- `pyproject.toml` ships `locmodel_edit` alongside the two existing modules; version bumped to
+  `3.0.0` throughout (CLI, MCP handshake, installer)
+- The default edit output is now the **protected** image: CPU recomposition overwrites the file
+  at `files[].path` and the engine's untouched output is kept beside it as `*_raw.png`. Each
+  `files[]` entry gained `protected` and `raw`, and `recomposed[]` gained `raw` next to `of`. Before
+  this change the default path held the engine output (verified on a real engine: 818 348 pixels
+  outside the mask had changed), so an agent that used `files[0]` silently got an unguarded image
+- The installer payload now ships `scripts/locmodel_edit.py` (mandatory) and
+  `annotator/mask_annotator.html` (optional); before this the installed tree was missing the edit
+  module entirely
+
+### Known limitations
+
+- `crop_upscale` (tiled upscaling of the edited crop) is declared but raises `not_supported`
+- Dedicated inpainting checkpoints (SD1.5/SDXL Inpainting, FLUX.1 Fill) are intentionally **not**
+  required; region editing relies on the edit-capable model families instead
+- Pure text editing inside an image remains out of scope
+
 ## [2.0.0] — 2026-11-09
 
 First public release. Rewritten for machines that are **not** the author's.

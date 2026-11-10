@@ -18,10 +18,12 @@ from .fsutil import InstallError, ensure_dir, read_text_flexible, write_text_ato
 PAYLOAD_FILES: list[tuple[str, bool]] = [
     ("scripts/locmodel_image.py", True),
     ("scripts/locmodel_mcp.py", True),
+    ("scripts/locmodel_edit.py", True),
     ("SKILL.md", True),
     ("README.md", False),
     ("README.zh-CN.md", False),
     ("LICENSE", False),
+    ("annotator/mask_annotator.html", False),
 ]
 
 CONFIG_EXAMPLE = """{

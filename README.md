@@ -29,6 +29,7 @@ exit codes.
 - [Quick start](#quick-start)
 - [Connect as an MCP server](#connect-as-an-mcp-server)
 - [Install the companion Skill](#install-the-companion-skill)
+- [Edit an existing image](#edit-an-existing-image)
 - [CLI reference](#cli-reference)
 - [Configuration reference](#configuration-reference)
 - [Sizing and VRAM strategy](#sizing-and-vram-strategy)
@@ -36,6 +37,7 @@ exit codes.
 - [Testing](#testing)
 - [Troubleshooting](#troubleshooting)
 - [Compatibility and limitations](#compatibility-and-limitations)
+- [What changed in 3.0](#what-changed-in-30)
 - [What changed in 2.0](#what-changed-in-20)
 - [License](#license)
 
@@ -77,6 +79,20 @@ per model, and getting it wrong is the number-one cause of "workspace capacity" 
 ---
 
 ## Install
+
+Two ways to install — pick **one**:
+
+- **Installer (single-file exe, no Python needed)** — recommended for normal use. Download
+  `locmodel-image-setup.exe` from [Releases](https://github.com/jaja1620/locmodel-image-MCP/releases),
+  double-click it, confirm once, done. It unpacks the runtime into `%LOCALAPPDATA%\locmodel-image`
+  and registers the MCP server into every supported client it detects. Marvis users then run
+  `locmodel-image-setup.exe emit marvis` and paste the printed instructions into chat.
+- **From source (needs Python 3.9+, the original way)** — clone and run, as described below.
+
+Detailed, bilingual step-by-step guide (install + usage + troubleshooting):
+[docs/INSTALL.md](docs/INSTALL.md) (English) · [docs/INSTALL.zh-CN.md](docs/INSTALL.zh-CN.md) (中文)
+
+### From source
 
 Nothing to build. Clone and run:
 
@@ -126,6 +142,97 @@ output/locmodel_20261109_171204_meta.json
 
 `_meta.json` records the effective prompt, seed, size after guard correction, steps, sampler, CFG,
 requested-vs-final size and elapsed seconds — so any image can be reproduced or audited later.
+
+## Edit an existing image
+
+v3.0 adds two verbs on top of text-to-image: **repaint one region** and **redraw the whole frame**.
+
+| You want | Use | Original pixels |
+| --- | --- | --- |
+| Change one area, keep the rest | `edit_image` (needs a mask) | Preserved outside the mask — enforced, not hoped for |
+| Same composition, new style/subject | `redraw_image` | Used as a structural reference only |
+
+### Give the mask three ways
+
+**Regions as JSON** — no image editor needed:
+
+```json
+{"unit": "norm", "regions": [
+  {"type": "rect", "x": [0.12, 0.10, 0.48, 0.42]},
+  {"type": "polygon", "points": [[0.60, 0.62], [0.92, 0.60], [0.78, 0.94]]}
+]}
+```
+
+`unit` is `norm` (0–1, resolution-independent, default) or `px`. Shapes are unioned.
+
+**A mask PNG** — white = repaint, black = keep. Rescaled automatically if the size differs.
+
+**A colour threshold** — "retexture that solid-colour wall" without drawing anything.
+
+**By hand** — open `annotator/mask_annotator.html` in any browser (single file, no install).
+Drag an image in, draw rectangles / polygons / freehand, then export `mask.png` or copy the
+normalised JSON straight into `edit_image`.
+
+### Model selection is explicit, never silent
+
+```bash
+python scripts/locmodel_image.py edit-models
+```
+
+Prints every model, which ones can edit regions, and which one would be picked automatically.
+The default priority is `qwen-image-edit` → `flux2-klein` → `qwen-image`.
+
+Discovery cost is bounded and cached, because probing for an engine that is not running used to
+be the slowest thing in the tool: process names are checked with `tasklist` before PowerShell is
+started to read command lines, `netstat` output is used to skip candidate ports that cannot be
+listening, and the resulting snapshot is reused for `edit.snapshot_cache_ttl` seconds (default
+120) across processes. A warm call answers in ~0.3 s; pass `--refresh` after loading a model by
+hand in the LocModel window:
+
+```bash
+python scripts/locmodel_image.py edit-models --refresh
+```
+
+- `edit.prefer_loaded` (default `true`) — if an editable model is already in VRAM, use it instead
+  of swapping to a "better" one. A swap means unload + reload: 30–60 s for a 4B model, longer for
+  a 20B, and it can OOM on a card that was already tight.
+- `edit.auto_load` (default `true`) — load the highest-priority editable model when nothing is
+  loaded. Without it the priority list would be decorative.
+- Pass `model` and it is used **exactly** — an unusable model raises an error listing the
+  alternatives rather than quietly substituting another one.
+- Only the `edit` family (Qwen-Image-Edit, FLUX.2 klein) can repaint a region. Pure generators
+  (Qwen-Image, Z-Image, SDXL, SD1.5) can only `redraw_image`.
+
+Every response carries a `selection` block (`requested` / `chosen` / `family` / `rank` / `reason` /
+`auto_loaded` / `candidates`) so you can explain why a particular model ran.
+
+### Outside the mask cannot change
+
+The engine is not trusted to respect the mask. Results are recomposited on the CPU —
+`result = where(mask > 127, edited, original)` — so pixels outside the mask are byte-identical to
+the source. `protected_pixels` / `redrawn_pixels` are reported for auditing.
+
+The file at `files[].path` **is** the protected image; the engine's unguarded output is kept
+beside it as `*_raw.png` and exposed as `files[].raw` (plus `recomposed[].raw`). `files[].protected`
+is `true` when recomposition succeeded. Only hand `files[].path` to the user — `_raw` exists for
+"what did the engine actually paint" debugging.
+
+```bash
+# repaint a region
+python scripts/locmodel_image.py edit --image ./output/v1.png \
+  --prompt "night-time glass curtain wall, interior lights on" \
+  --region 0.25,0.18,0.62,0.55 --strength 0.8
+
+# repaint using an exported mask
+python scripts/locmodel_image.py edit --image ./output/v1.png --mask ./output/mask.png \
+  --prompt "oak slat ceiling"
+
+# same composition, watercolour
+python scripts/locmodel_image.py redraw --image ./output/v1.png \
+  --prompt "watercolour architectural sketch, loose ink lines, white paper" --strength 0.65
+```
+
+The source image is never overwritten; each edit lands in a new file so variants can be compared.
 
 ---
 
@@ -183,6 +290,10 @@ unreliable on your machine:
 | --- | --- | --- |
 | `generate_image` | `prompt` (required), `negative_prompt`, `width`, `height`, `aspect`, `steps`, `sampler`, `seed`, `count`, `output_dir`, `filename_prefix`, `model`, `timeout_s` | Image paths, effective seed, final size, elapsed time |
 | `locmodel_status` | — | Engine state, port + how it was found, model, engine defaults, GPU memory |
+| `edit_image` | `init_image` (required), `prompt` (required), `mask_image` \| `regions`, `strength`, `negative_prompt`, `model`, `steps`, `sampler`, `cfg_scale`, `seed`, `mask_blur`, `inpaint_padding`, `channel`, `out_dir`, `filename_prefix`, `verify`, `dry_run` | Edited image paths, mask stats, `selection` (model actually used), `verify` block |
+| `redraw_image` | `init_image` (required), `prompt` (required), `strength`, + the same optional set | Redrawn image paths, `selection`, `verify` |
+| `list_edit_models` | — | Models with family/rank, which can edit regions, and the automatic pick |
+| `load_model` | `name` (required), `timeout` | Loads/switches the engine model, verifies it took effect |
 | `list_models` | — | Models reported by the engine |
 | `engine_doctor` | — | Full self-check with pass/fail per item |
 | `engine_discover` | — | Force a port re-scan and report the result |
@@ -231,6 +342,10 @@ locmodel_image.py [--config PATH] [--verbose] [--log-file PATH] <command> [optio
 | `models` | List models the engine reports |
 | `doctor` | Environment self-check; exit code reflects health |
 | `generate` | Submit a job and wait for the image |
+| `edit` | Repaint a masked region of an existing image |
+| `redraw` | Re-draw a whole image from a new prompt |
+| `edit-models` | Models that can edit, their priority, and the automatic pick |
+| `load-model` | Load or switch the model inside the engine |
 | `config show\|get\|set\|path` | Inspect or modify configuration |
 
 ### `generate` options
@@ -253,6 +368,26 @@ locmodel_image.py [--config PATH] [--verbose] [--log-file PATH] <command> [optio
 | `--retry` | `generate.retry` | Retries with a new seed on transient failure |
 | `--no-guard` | off | Send the requested size verbatim |
 | `--dry-run` | off | Print the HTTP payload and exit — no GPU time spent |
+
+### `edit` options
+
+| Option | Default | Notes |
+| --- | --- | --- |
+| `--image` | required | Source image (never modified) |
+| `--prompt` | required | What should appear *inside* the mask |
+| `--mask` | — | Mask PNG, white = repaint. Wins over `--region` |
+| `--region` | — | `x1,y1,x2,y2`, repeatable. Coordinates follow `--unit` |
+| `--unit` | `norm` | `norm` (0–1) or `px` |
+| `--invert` | off | Invert the generated mask |
+| `--strength` | `0.75` | Denoising strength; raise to repaint more freely |
+| `--mask-blur` | `8` | Feather the mask edge to avoid seams |
+| `--padding` | `32` | Grow the mask before the engine sees it |
+| `--channel` | `auto` | `img_gen` (async) → `img2img` (sync) fallback |
+| `--model` | auto | Exact model; error rather than substitution |
+| `--verify` | `agent` | Re-read the output and check it |
+| `--dry-run` | off | Print the payload (no engine contact, no GPU time) |
+
+`redraw` takes the same options minus the mask ones, and defaults to `--strength 0.6`.
 
 ### Exit codes
 
@@ -316,6 +451,29 @@ Keys (defaults shown):
     "lock": true,
     "lock_wait": 900
   },
+  "edit": {
+    "priority": ["qwen-image-edit", "flux2-klein", "qwen-image"],
+    "prefer_loaded": true,             // keep the loaded model, don't swap for a better rank
+    "auto_load": true,                 // load the best editable model when none is loaded
+    "auto_load_timeout": 240,
+    "channel": "auto",                 // img_gen -> img2img fallback
+    "strength": 0.75,                  // region edit
+    "redraw_strength": 0.6,            // whole-image redraw
+    "timeout": 900,
+    "mask_blur": 8,
+    "inpaint_padding": 32,
+    "verify": "agent",
+    "models_dirs": [],                 // extra folders to scan when the engine reports none
+    "load_endpoint": null,
+    "resolved_channel": null,
+    "engine_cache_ttl": 20,            // seconds; in-process memo
+    "snapshot_cache_ttl": 120          // seconds; the snapshot survives processes
+  },
+  "discover": {
+    "process_cache_ttl": 20,           // reuse the process command lines
+    "budget_seconds": 20,              // hard ceiling for all port probing
+    "listen_budget_seconds": 4         // ceiling for the netstat leftover sweep
+  },
   "gpu": { "min_free_mb_warn": 500 },
   "output": { "dir": "./output" }
 }
@@ -328,6 +486,9 @@ locmodel_image.py config set engine.probe_timeout 3      # slow / remote machine
 locmodel_image.py config set generate.max_count 2        # 6 GB VRAM users
 locmodel_image.py config set size.max_side_auto false    # pin the ceiling yourself
 locmodel_image.py config set generate.lock false          # single-process only
+locmodel_image.py config set edit.prefer_loaded false     # always swap to the top-priority model
+locmodel_image.py config set edit.priority '["flux2-klein","qwen-image-edit"]'
+locmodel_image.py config set edit.models_dirs '["F:/AI-Models"]'  # scan when the engine is idle
 ```
 
 ---
@@ -445,6 +606,24 @@ directory writability in one shot.
 - **Text in images**: a limitation of the models, not of the bridge.
 
 ---
+
+## What changed in 3.0
+
+- **`edit_image` / `redraw_image`** — prompt-driven editing on an existing image, without
+  downloading a dedicated inpainting checkpoint. The engine's existing `init_image` + `mask_image`
+  path is used; masks are built on the CPU with the standard library only.
+- **Mask outside the mask is guaranteed** — results are recomposited on the CPU against the
+  original, so "keep everything except this area" is a real guarantee rather than a hope.
+- **Model priority without silent surprises** — `edit.priority` plus `edit.prefer_loaded` /
+  `edit.auto_load`, and an explicit error instead of a substitution when the requested model cannot
+  edit.
+- **`list_edit_models` / `load_model`** — see which models can edit, why one was chosen, and load or
+  switch models without leaving the agent.
+- **`annotator/mask_annotator.html`** — a single-file browser mask painter (rect / polygon /
+  brush) that exports a mask PNG or normalised JSON.
+- **Faster probes** — engine discovery is cached (`edit.engine_cache_ttl`), so a closed engine no
+  longer costs a scan on every call.
+- Still **zero dependencies**: standard library only, Python 3.8+.
 
 ## What changed in 2.0
 
