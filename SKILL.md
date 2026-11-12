@@ -112,20 +112,20 @@ GUI 用自己的面板状态把该文件回写覆盖，改完当场就被抹掉�
 
 | 参数 | 默认 | 取值 | 一句话 |
 | --- | --- | --- | --- |
-| `cfg`（别名 `cfg_scale`、`txt_cfg`） | 引擎面板值（常见 7.0） | 0–30 | 1.0–1.5 保构图；2.0+ 更贴提示词但易过曝 |
-| `img_cfg` | 空（关闭） | 0–30 | 图像条件分支的 CFG，图生图时才用 |
-| `steps`（`sample_steps`） | 引擎面板值（常见 20） | 1–200 | turbo/flow 模型 8–12 就够；>30 收益看不见、时间翻倍 |
-| `sampler`（`sample_method`） | 引擎面板值（常见 euler） | 22 种，见 `params list` | 不指定就别指定；`dpm++2m` 是通用升级项 |
-| `scheduler` | `default` | 19 种，见 `params list` | `karras`/`beta` 更锐，`sgm_uniform` 更顺；`default` 由引擎按模型映射 |
-| `flow_shift` | 空（自动） | 0–100 | flow matching 模型的低频结构权重，2–5 有感知 |
-| `shifted_timestep` | 0 | -1–1000 | 时间步偏移，默认别动 |
-| `eta` | 空 | 0–1 | SDE 采样器的噪声注入；0 确定、1 全随机 |
-| `distilled_guidance` | 3.5 | 0–30 | 蒸馏/加速模型自带的指导强度 |
-| `slg_scale` | 0.0 | -10–10 | 跳层引导，0 关闭；±1–3 是常用区间 |
-| `clip_skip` | -1 | -64–12 | -1 = 引擎默认（通常跳 1 层） |
-| `strength` | 0.75 | 0–1 | 仅改图/图生图：0.35 微调、0.75 常规、1.0 忽略原图 |
-| `seed` | -1（随机） | -1 或整数 | 复现、A/B 对比必固定 |
-| `count` | 1 | 1–8（受 `generate.max_count` 约束） | 显存不足时别超 2 |
+| **`cfg`**（别名 `cfg_scale`、`txt_cfg`） | 引擎面板值（常见 7.0） | 0–30 | 1.0–1.5 保构图；2.0+ 更贴提示词但易过曝 |
+| **`img_cfg`** | 空（关闭） | 0–30 | 图像条件分支的 CFG，图生图时才用 |
+| **`steps`**（`sample_steps`） | 引擎面板值（常见 20） | 1–200 | turbo/flow 模型 8–12 就够；>30 收益看不见、时间翻倍 |
+| **`sampler`**（`sample_method`） | 引擎面板值（常见 euler） | 22 种，见 `params list` | 不指定就别指定；`dpm++2m` 是通用升级项 |
+| **`scheduler`** | `default` | 19 种，见 `params list` | `karras`/`beta` 更锐，`sgm_uniform` 更顺；`default` 由引擎按模型映射 |
+| **`flow_shift`** | 空（自动） | 0–100 | flow matching 模型的低频结构权重，2–5 有感知 |
+| **`shifted_timestep`** | 0 | -1–1000 | 时间步偏移，默认别动 |
+| **`eta`** | 空 | 0–1 | SDE 采样器的噪声注入；0 确定、1 全随机 |
+| **`distilled_guidance`** | 3.5 | 0–30 | 蒸馏/加速模型自带的指导强度 |
+| **`slg_scale`** | 0.0 | -10–10 | 跳层引导，0 关闭；±1–3 是常用区间 |
+| **`clip_skip`** | -1 | -64–12 | -1 = 引擎默认（通常跳 1 层） |
+| **`strength`** | 0.75 | 0–1 | 仅改图/图生图：0.35 微调、0.75 常规、1.0 忽略原图 |
+| **`seed`** | -1（随机） | -1 或整数 | 复现、A/B 对比必固定 |
+| **`count`** | 1 | 1–8（受 `generate.max_count` 约束） | 显存不足时别超 2 |
 
 默认值随模型和面板变，**不要背数字**，用 `params list` / `get_workflow_params` 读实时值：
 `source=engine` 表示从 `/sdcpp/v1/capabilities` 读到，`source=tool` 表示引擎没报、用内置兜底。
