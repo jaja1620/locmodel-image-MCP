@@ -4,6 +4,41 @@ All notable changes to this project are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows [Semantic Versioning](https://semver.org/).
 
+## [3.1.0] — 2026-11-12
+
+Workflow parameters reach the engine. Everything the engine accepts in `sample_params`,
+`hires`, `vae_tiling_params`, `high_noise_sample_params` and `lora` can now be set from the tool,
+and nothing is written to `config.json`: the LocModel GUI owns that file and rewrites it from its
+own panel state, so the HTTP payload is the only channel that survives.
+
+### Added
+
+- `scripts/locmodel_workflow.py` — the parameter contract: alias table, type/range validation,
+  live-default discovery from `/sdcpp/v1/capabilities`, three-layer resolution, payload injection
+- `params` argument on `generate_image` (MCP) and `--param key=value` on `generate` (CLI)
+- `set_workflow_params` / `get_workflow_params` / `reset_workflow_params` (MCP) and
+  `params list | show | set | reset` (CLI) — session scope lives in process memory and dies with it
+- `edit_image` / `redraw_image` inherit session parameters, so one `set_workflow_params` covers a
+  whole batch of edits
+- Live defaults are printed with a `source` column: `engine` (advertised), `tool` (fallback),
+  `session` (overridden), `unset`
+- `tests/test_workflow.py` — 16 cases covering aliases, coercion, rejection, payload paths,
+  precedence, session lifetime and the documented core-key band
+
+### Fixed
+
+- `generate_image` accepted `steps` and `sampler` but silently dropped `cfg`; it is wired through
+- Illegal values are rejected client-side with `bad_arguments`. The engine answers `202 queued` for
+  junk (`scheduler="bogus"`, `steps="abc"`) and then hangs the job, so validation cannot be left to
+  the server.
+
+### Notes
+
+- Parameter table is deliberately small (14 core keys, folded `hires` / `vae_tiling` /
+  `high_noise` / `slg` / raw groups), and everything is omitted from the payload unless asked for.
+  A session that never touches a parameter behaves exactly as before: the GUI panel decides.
+- `generate_video` is deferred to 3.2.
+
 ## [3.0.0] — 2026-11-10
 
 Image editing on top of text-to-image. No new model download, no new dependency: the engine's
