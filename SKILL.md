@@ -95,16 +95,107 @@ license: MIT
 
 ## 参数选择
 
-| 参数 | 默认 | 说明 |
+### 三条通道，别走错
+
+| 参数族 | 有哪些 | 怎么传 | 落盘吗 |
+| --- | --- | --- | --- |
+| 尺寸与内容 | `width` `height` `aspect` `negative_prompt` `prompt` | 工具入参 | 否 |
+| 生成工作流（核心 14 项） | 见下表，直接展开 | 单次 `params={...}` 或会话 `set_workflow_params` | 否，只在 HTTP payload |
+| 折叠组 | hires / vae_tiling / high_noise / slg / raw(lora) | 同上，用户确需调整时再展开 | 否，只在 HTTP payload |
+
+**铁律**：工作流参数一律走 HTTP payload，**永远不要去改 LocModel 的 `config.json`**。
+GUI 用自己的面板状态把该文件回写覆盖，改完当场就被抹掉，还会让用户以为改动生效了。
+
+尺寸守卫段（见下）照旧由面积校验负责，工作流参数不参与尺寸校正。
+
+### 核心参数（14 项，默认值仅供参考）
+
+| 参数 | 默认 | 取值 | 一句话 |
+| --- | --- | --- | --- |
+| `cfg`（别名 `cfg_scale`、`txt_cfg`） | 引擎面板值（常见 7.0） | 0–30 | 1.0–1.5 保构图；2.0+ 更贴提示词但易过曝 |
+| `img_cfg` | 空（关闭） | 0–30 | 图像条件分支的 CFG，图生图时才用 |
+| `steps`（`sample_steps`） | 引擎面板值（常见 20） | 1–200 | turbo/flow 模型 8–12 就够；>30 收益看不见、时间翻倍 |
+| `sampler`（`sample_method`） | 引擎面板值（常见 euler） | 22 种，见 `params list` | 不指定就别指定；`dpm++2m` 是通用升级项 |
+| `scheduler` | `default` | 19 种，见 `params list` | `karras`/`beta` 更锐，`sgm_uniform` 更顺；`default` 由引擎按模型映射 |
+| `flow_shift` | 空（自动） | 0–100 | flow matching 模型的低频结构权重，2–5 有感知 |
+| `shifted_timestep` | 0 | -1–1000 | 时间步偏移，默认别动 |
+| `eta` | 空 | 0–1 | SDE 采样器的噪声注入；0 确定、1 全随机 |
+| `distilled_guidance` | 3.5 | 0–30 | 蒸馏/加速模型自带的指导强度 |
+| `slg_scale` | 0.0 | -10–10 | 跳层引导，0 关闭；±1–3 是常用区间 |
+| `clip_skip` | -1 | -64–12 | -1 = 引擎默认（通常跳 1 层） |
+| `strength` | 0.75 | 0–1 | 仅改图/图生图：0.35 微调、0.75 常规、1.0 忽略原图 |
+| `seed` | -1（随机） | -1 或整数 | 复现、A/B 对比必固定 |
+| `count` | 1 | 1–8（受 `generate.max_count` 约束） | 显存不足时别超 2 |
+
+默认值随模型和面板变，**不要背数字**，用 `params list` / `get_workflow_params` 读实时值：
+`source=engine` 表示从 `/sdcpp/v1/capabilities` 读到，`source=tool` 表示引擎没报、用内置兜底。
+
+### 折叠组（默认不动，确需调整再展开）
+
+<details><summary>hires fix：二次放大（7 项）</summary>
+
+| 参数 | 默认 | 取值 | 说明 |
+| --- | --- | --- | --- |
+| `hires_enabled` | false | true/false | 关时其余 hires 参数不生效 |
+| `hires_upscaler` | 引擎值 | Lanczos / Nearest / Latent(…) 等 | Latent 系保细节，Lanczos 最快 |
+| `hires_target_width` / `hires_target_height` | 引擎值 | 64–8192 | 目标尺寸，上限受引擎 `max_upscale_*` 约束 |
+| `hires_steps` | 引擎值 | 1–200 | 第二遍步数 |
+| `hires_denoising_strength` | 引擎值 | 0–1 | 0.3–0.5 保原图，>0.6 开始重画 |
+| `hires_upscale_tile_size` | 0 | 0–4096 | 大图分块放大，0 = 不分块 |
+
+</details>
+
+<details><summary>VAE tiling：低显存救命键（5 项）</summary>
+
+| 参数 | 默认 | 取值 | 说明 |
+| --- | --- | --- | --- |
+| `vae_tiling` | false | true/false | 大画布 OOM 时先开这个 |
+| `vae_tile_size_w` / `vae_tile_size_h` | 0 | 0–4096 | 0 = 引擎自选 |
+| `vae_target_overlap` | 0.5 | 0–1 | 拼缝处重叠比例，太低会出接缝 |
+| `vae_temporal_tiling` | false | true/false | 视频模型用；图片任务保持关闭 |
+
+</details>
+
+<details><summary>high noise：双模型/高噪分支（3 项）</summary>
+
+| 参数 | 默认 | 取值 |
 | --- | --- | --- |
-| `width`/`height` | 引擎默认（常见 1024×1024） | 由面积守卫自动校正，见下 |
-| `aspect` | 无 | 用长宽比代替具体尺寸；与 width/height 二选一 |
-| `steps` | 引擎默认（turbo 模型常见 8） | 一般不调；>20 明显变慢且收益小 |
-| `cfg` | 引擎默认（turbo 常见 1.0） | 1.0–1.5 保构图；2.0+ 更贴提示词但易过曝 |
-| `sampler` | 引擎默认（常见 euler） | 不指定就别指定 |
-| `seed` | -1（随机） | 复现用固定值；批量对比同一 prompt 时固定 seed 只看尺寸/参数差异 |
-| `count` | 1 | 上限 `generate.max_count`（默认 4），显存不足时别超过 2 |
-| `negative` | 空 | 见提示词规范 |
+| `high_noise_steps` | 引擎值 | 1–200 |
+| `high_noise_cfg` | 引擎值 | 0–30 |
+| `high_noise_sampler` | 引擎值 | 22 种采样器 |
+
+</details>
+
+<details><summary>SLG 细节（3 项）</summary>
+
+`slg_layers`（默认 `[7,8,9]`）、`slg_layer_start`（0–1）、`slg_layer_end`（0–1）。
+只调 `slg_scale` 就够，这三项是精调时才动。
+
+</details>
+
+<details><summary>raw：原样透传（3 项）</summary>
+
+`custom_sigmas`（sigma 列表）、`extra_sample_args`（键值对）、`lora`
+（`[{"path":"x.safetensors","multiplier":0.8}]`，需要引擎启动时带 `--lora-model-dir`，否则不可用）。
+
+</details>
+
+### 作用域：单次 / 本会话 / 恢复默认
+
+| 想要的效果 | MCP | CLI | 生命周期 |
+| --- | --- | --- | --- |
+| 只改这一次 | `generate_image(prompt=..., params={"cfg": 3.5})` | `--param cfg=3.5` | 该次调用 |
+| 后面这一串图都改 | `set_workflow_params(params={"cfg":3.5,"scheduler":"karras"})` | 同一进程内 `params set --param cfg=3.5` | MCP 进程内存，进程退出即失效 |
+| 全部恢复默认 | `reset_workflow_params()` | `params reset` | 立刻回到 GUI 面板设置 |
+| 只恢复某一项 | `reset_workflow_params(keys=["cfg"])` | 重新 `params set` 覆盖 | 同上 |
+
+优先级：**单次 `params` > 会话参数 > LocModel GUI 面板 / 引擎默认**。
+
+会话参数只存在 MCP 进程里，不写任何文件，进程重启自动清空 —— 这是刻意的：
+只有这样才不会和 GUI 抢 `config.json`。
+
+**默认行为**：用户没点名要调参数时，**不要主动设置任何工作流参数**，一切按 LocModel
+GUI 面板的现有设置出图。参数是用户提要求时才启用的开关，不是每次都要填的表。
 
 **尺寸守卫（按总像素面积，不按单边）**：引擎对过小的图会失败（512×512 实测报 `no results`），对过大的图会 OOM。
 - 下限 `size.min_area`（默认 768² ≈ 59 万像素），小于则**等比放大**，保留用户长宽比
@@ -117,11 +208,23 @@ license: MIT
 MCP 工具：
 ```
 generate_image(prompt="...", aspect="16:9", out_dir="<会话 output 目录>", seed=12345)
+
+# 本次生效
+generate_image(prompt="...", params={"cfg": 3.5, "scheduler": "karras"})
+
+# 本会话后续全部生效
+set_workflow_params(params={"cfg": 3.5, "steps": 12})
+get_workflow_params()            # 看实时默认值、取值范围、来源
+reset_workflow_params()          # 一条命令全部恢复默认
 ```
 
 CLI：
 ```bash
 python scripts/locmodel_image.py generate --prompt "..." --aspect 16:9 --out <目录> --seed 12345
+python scripts/locmodel_image.py generate --prompt "..." --param cfg=3.5 --param scheduler=karras
+python scripts/locmodel_image.py params list          # 核心参数 + 实时默认值
+python scripts/locmodel_image.py params list --all    # 含折叠组
+python scripts/locmodel_image.py params reset         # 全部恢复默认
 python scripts/locmodel_image.py status
 python scripts/locmodel_image.py doctor
 ```

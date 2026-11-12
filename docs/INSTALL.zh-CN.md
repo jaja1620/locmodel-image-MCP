@@ -1,3 +1,14 @@
+---
+AIGC:
+    Label: "1"
+    ContentProducer: 001191440300708461136T1XGW3
+    ProduceID: 798659b1f59514cb753b383c1f423b09_1ca9e719dcc711f1bff2525400cd780f
+    ReservedCode1: z11qvUoLFof4UorUjY08YdBA/kkUHdzfpi21lWfmN1m+ZRXUgDqOqHbOMDeQ1Jr9QGKYbU5XnPrY5WrSR675H5tdjtbgR1NTJK7JK+bm5dyIdHeketxLwsKvMVfx2MbSBEtINtEPhLa6j75d5nyoY67+z9o/DqjMzeC/KwCX+x3rSTgrC0+AjXnEBAs=
+    ContentPropagator: 001191440300708461136T1XGW3
+    PropagateID: 798659b1f59514cb753b383c1f423b09_1ca9e719dcc711f1bff2525400cd780f
+    ReservedCode2: z11qvUoLFof4UorUjY08YdBA/kkUHdzfpi21lWfmN1m+ZRXUgDqOqHbOMDeQ1Jr9QGKYbU5XnPrY5WrSR675H5tdjtbgR1NTJK7JK+bm5dyIdHeketxLwsKvMVfx2MbSBEtINtEPhLa6j75d5nyoY67+z9o/DqjMzeC/KwCX+x3rSTgrC0+AjXnEBAs=
+---
+
 # 安装与使用说明 —— locmodel-image 3.0.0
 
 [English](./INSTALL.md) | 简体中文
@@ -319,3 +330,4 @@ python scripts/locmodel_image.py config path
 安装器的载荷已补入 `scripts/locmodel_edit.py` 与 `annotator/mask_annotator.html`。
 
 许可证：MIT。问题与建议：https://github.com/jaja1620/locmodel-image-MCP
+*（内容由AI生成，仅供参考）*

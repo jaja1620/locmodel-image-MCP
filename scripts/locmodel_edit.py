@@ -44,13 +44,15 @@ import zlib
 from datetime import datetime
 from pathlib import Path
 
+import locmodel_workflow as workflow
+
 try:
     import locmodel_image as core
 except Exception as exc:  # pragma: no cover - surfaced to the caller
     core = None
     _CORE_IMPORT_ERROR = f"{type(exc).__name__}: {exc}"
 
-VERSION = "3.0.0"
+VERSION = "3.1.0"
 PNG_SIG = b"\x89PNG\r\n\x1a\n"
 
 # ---------------------------------------------------------------------------
@@ -1065,6 +1067,14 @@ def _payload_img_gen(kw: dict) -> dict:
         payload["mask_image"] = _data_uri(kw["mask_path"])
     if kw.get("model"):
         payload["model"] = kw["model"]
+    # session-scoped workflow parameters (v3.1) ride along in the payload only --
+    # LocModel's config.json is owned by the GUI and would overwrite them
+    session = workflow.session_get()
+    if session:
+        try:
+            workflow.apply(payload, session)
+        except Exception:  # a bad session value must never break an edit
+            log("workflow parameters ignored for this edit: %s" % (session,))
     return payload
 
 

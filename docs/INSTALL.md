@@ -1,3 +1,14 @@
+---
+AIGC:
+    Label: "1"
+    ContentProducer: 001191440300708461136T1XGW3
+    ProduceID: 798659b1f59514cb753b383c1f423b09_1abc8ad1dcc711f1a0ca525400de85a5
+    ReservedCode1: b1rA4+We0a4AiTiakHwA9JPmYGt38AyPpMod1e7N3RpJ50b+OduRZejbn6XKh3wlExU1kzRn0xcsRPNYp6MwkfFoNlZsrzCasRQUZW7wF2MYBnP3x8Qz7wzJT+6c/DMSgUul8Xe/I3uUtKqAeRqko14y1ctrNGlPS2SFMaVtsFj7HlGMmHwryplff4M=
+    ContentPropagator: 001191440300708461136T1XGW3
+    PropagateID: 798659b1f59514cb753b383c1f423b09_1abc8ad1dcc711f1a0ca525400de85a5
+    ReservedCode2: b1rA4+We0a4AiTiakHwA9JPmYGt38AyPpMod1e7N3RpJ50b+OduRZejbn6XKh3wlExU1kzRn0xcsRPNYp6MwkfFoNlZsrzCasRQUZW7wF2MYBnP3x8Qz7wzJT+6c/DMSgUul8Xe/I3uUtKqAeRqko14y1ctrNGlPS2SFMaVtsFj7HlGMmHwryplff4M=
+---
+
 # Installation and Usage Guide — locmodel-image 3.0.0
 
 English | [简体中文](./INSTALL.zh-CN.md)
@@ -333,3 +344,4 @@ untouched** — the engine's own output is preserved separately as `*_raw.png`. 
 ships `scripts/locmodel_edit.py` and `annotator/mask_annotator.html` in its payload.
 
 License: MIT. Issues and pull requests: https://github.com/jaja1620/locmodel-image-MCP
+*（内容由AI生成，仅供参考）*

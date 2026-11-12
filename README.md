@@ -31,12 +31,14 @@ exit codes.
 - [Install the companion Skill](#install-the-companion-skill)
 - [Edit an existing image](#edit-an-existing-image)
 - [CLI reference](#cli-reference)
+- [Workflow parameters](#workflow-parameters)
 - [Configuration reference](#configuration-reference)
 - [Sizing and VRAM strategy](#sizing-and-vram-strategy)
 - [How it works](#how-it-works)
 - [Testing](#testing)
 - [Troubleshooting](#troubleshooting)
 - [Compatibility and limitations](#compatibility-and-limitations)
+- [What changed in 3.1](#what-changed-in-31)
 - [What changed in 3.0](#what-changed-in-30)
 - [What changed in 2.0](#what-changed-in-20)
 - [License](#license)
@@ -403,6 +405,80 @@ Scripts can branch on the code; agents can branch on the `error` field in the JS
 
 ---
 
+## Workflow parameters
+
+Anything the engine's `sample_params`, `hires`, `vae_tiling_params`, `high_noise_sample_params`
+or `lora` blocks accept can be set from this tool as of 3.1. Parameters travel **inside the HTTP
+payload only** — never through `config.json`. LocModel owns that file and rewrites it from its own
+panel state, so anything written there is silently reverted; the payload is the only channel that
+actually holds.
+
+Three scopes, deliberately different lifetimes:
+
+| Scope | MCP | CLI | Lifetime |
+| --- | --- | --- | --- |
+| One call | `generate_image(..., params={"cfg": 3.5})` | `generate --param cfg=3.5` | that job only |
+| This session | `set_workflow_params(params={"cfg": 3.5, "scheduler": "karras"})` | `params set --param cfg=3.5` | MCP process memory; gone on restart |
+| Back to defaults | `reset_workflow_params()` / `reset_workflow_params(keys=["cfg"])` | `params reset` | immediately follows the GUI panel again |
+
+Precedence: **per-call `params` > session parameters > LocModel GUI panel / engine defaults.**
+When nobody asks for a parameter, nothing is sent and generation follows the GUI panel exactly as
+before — the table is a switch, not a form to fill in.
+
+Read live defaults at any time:
+
+```bash
+python scripts/locmodel_image.py params list          # 14 core parameters, with live defaults
+python scripts/locmodel_image.py params list --all    # include folded groups
+python scripts/locmodel_image.py params show --param cfg
+```
+
+`source: engine` means the value came from `/sdcpp/v1/capabilities`; `source: tool` means the engine
+did not advertise it and a built-in fallback was used; `source: session` means it is currently
+overridden in this process.
+
+### Core parameters (14)
+
+| Parameter | Aliases | Range | Notes |
+| --- | --- | --- | --- |
+| `cfg` | `cfg_scale`, `txt_cfg` | 0–30 | prompt adherence vs. highlight blow-out |
+| `img_cfg` | — | 0–30 | conditional image branch; empty disables |
+| `steps` | `sample_steps` | 1–200 | turbo/flow models peak at 8–12 |
+| `sampler` | `sample_method` | 22 values | `euler` is the safe default |
+| `scheduler` | — | 19 values | `karras`/`beta` sharper, `sgm_uniform` smoother |
+| `flow_shift` | — | 0–100 | flow-matching models, 2–5 is noticeable |
+| `shifted_timestep` | — | -1–1000 | leave at 0 |
+| `eta` | — | 0–1 | SDE samplers: noise injection |
+| `distilled_guidance` | — | 0–30 | distilled/accelerated checkpoints |
+| `slg_scale` | — | -10–10 | skip-layer guidance, 0 disables |
+| `clip_skip` | — | -64–12 | -1 = engine default |
+| `strength` | — | 0–1 | edit/img2img only: 0.35 subtle, 0.75 normal |
+| `seed` | — | -1 or int | -1 randomises, fix it for A/B |
+| `count` | — | 1–8 | also capped by `generate.max_count` |
+
+### Folded groups
+
+These stay out of the way until a task needs them; `params list --all` prints them with the same
+live defaults.
+
+- **hires** — `hires_enabled`, `hires_upscaler`, `hires_target_width`, `hires_target_height`,
+  `hires_steps`, `hires_denoising_strength`, `hires_upscale_tile_size`
+- **vae via tiling** — `vae_tiling`, `vae_tile_size_w`, `vae_tile_size_h`, `vae_target_overlap`,
+  `vae_temporal_tiling` (18 GB of VRAM not required: turn this on before shrinking the canvas)
+- **high noise** — `high_noise_steps`, `high_noise_cfg`, `high_noise_sampler`
+- **slg detail** — `slg_layers`, `slg_layer_start`, `slg_layer_end`
+- **raw passthrough** — `custom_sigmas`, `extra_sample_args`, `lora`
+  (`[{"path": "x.safetensors", "multiplier": 0.8}]`; requires `--lora-model-dir` on the engine)
+
+### Validation is client-side
+
+The engine returns `202 queued` for nonsense (`scheduler="bogus"`, `steps="abc"`) and then hangs the
+job. Every value is therefore type- and range-checked here first; a bad value fails fast with
+`bad_arguments` and a hint, before any GPU time is spent. Aliases are accepted
+(`cfg_scale`→`cfg`, `sample_steps`→`steps`, `Karras`→`karras`, `"7,8,9"`→`[7, 8, 9]`).
+
+---
+
 ## Configuration reference
 
 Location (first match wins):
@@ -606,6 +682,19 @@ directory writability in one shot.
 - **Text in images**: a limitation of the models, not of the bridge.
 
 ---
+
+## What changed in 3.1
+
+- **Workflow parameter channel** — `params` on `generate_image` / `generate --param`, plus
+  `set_workflow_params` / `get_workflow_params` / `reset_workflow_params`. Values are merged into the
+  HTTP payload, never into `config.json`, because the LocModel GUI rewrites that file from its own
+  panel state. Defaults are read live from the engine so the documented numbers cannot drift.
+- **`cfg` reachable from MCP** — `generate_image` accepted `steps` and `sampler` before but silently
+  dropped `cfg`; it is now wired through.
+- **Client-side validation** — the engine accepts junk values and hangs the job, so type and range
+  checks happen before submission.
+- **Session scope** — parameters set with `set_workflow_params` apply to every later job in the same
+  MCP process and vanish on restart; `edit_image` / `redraw_image` honour them too.
 
 ## What changed in 3.0
 

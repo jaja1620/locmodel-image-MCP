@@ -60,7 +60,9 @@ import urllib.request
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "3.0.0"
+import locmodel_workflow as workflow
+
+VERSION = "3.1.0"
 APP_NAME = "locmodel-image"
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -569,14 +571,18 @@ def engine_defaults(base: str, cfg: dict) -> dict:
     caps = capabilities(base, cfg)
     d = (caps.get("defaults") or {}) if isinstance(caps, dict) else {}
     sp = d.get("sample_params") or {}
-    guidance = sp.get("guidance") or {}
+    # capabilities spells the guidance block "guided"; read it through the
+    # shared contract so both names are handled and the values stay in one place
+    live = workflow.defaults_from_capabilities(caps)
     return {
         "width": d.get("width"),
         "height": d.get("height"),
-        "steps": sp.get("sample_steps"),
-        "sampler": sp.get("sample_method"),
-        "cfg": guidance.get("txt_cfg"),
-        "batch_count": d.get("batch_count"),
+        "steps": live.get("steps"),
+        "sampler": live.get("sampler"),
+        "cfg": live.get("cfg"),
+        "batch_count": d.get("batch_count") or live.get("count"),
+        "workflow": live,
+        "_sample_params_raw": sp,
     }
 
 
@@ -828,13 +834,14 @@ def generate(prompt: str = "", cfg: dict | None = None, *, negative_prompt: str 
              seed: int = -1, count: int = 1, out_dir: str | None = None,
              filename_prefix: str = "locmodel", timeout: int | None = None,
              retry: int | None = None, guard: bool = True, model: str | None = None,
-             dry_run: bool = False) -> dict:
+             params: dict | None = None, dry_run: bool = False) -> dict:
     cfg = cfg or load_config()
     if not prompt or not prompt.strip():
         raise BridgeError("prompt must not be empty", "bad_arguments")
 
     # Validate cheap arguments BEFORE touching the engine so that misuse never
     # costs a network round-trip.
+    count = 1 if count is None else count
     max_count = int(cfg_get(cfg, "generate.max_count", 4))
     if int(count) > max_count:
         raise BridgeError(f"count={count} exceeds generate.max_count={max_count}", "bad_arguments")
@@ -847,6 +854,23 @@ def generate(prompt: str = "", cfg: dict | None = None, *, negative_prompt: str 
     base, port, src = base_url(cfg=cfg)
     gpu = gpu_memory()
     eng = engine_defaults(base, cfg)
+
+    # --- v3.1 workflow parameters ------------------------------------------
+    # Payload-only by design: LocModel owns config.json and rewrites custom
+    # values from its own panel state, so anything stored there is volatile.
+    _explicit: dict = {}
+    if steps is not None:
+        _explicit["steps"] = steps
+    if sampler:
+        _explicit["sampler"] = sampler
+    if cfg_scale is not None:
+        _explicit["cfg"] = cfg_scale
+    if seed not in (None, -1):
+        _explicit["seed"] = seed
+    try:
+        wf = workflow.resolve(_explicit, workflow.normalize(params), workflow.session_get())
+    except workflow.ParamError as exc:
+        raise BridgeError(str(exc), "bad_arguments", getattr(exc, "hint", "")) from None
 
     if aspect and not (width and height):
         w0, h0 = aspect_to_size(aspect, (width or height or 1024) ** 2 or 1024 * 1024)
@@ -886,6 +910,18 @@ def generate(prompt: str = "", cfg: dict | None = None, *, negative_prompt: str 
         payload["sample_params"]["guidance"] = {"txt_cfg": float(cfg_scale)}
     if model:
         payload["model"] = model
+
+    if wf:
+        workflow.apply(payload, wf)
+    payload.setdefault("sample_params", {})
+    steps = int(payload["sample_params"].get("sample_steps") or steps)
+    sampler = payload["sample_params"].get("sample_method") or sampler
+    cfg_scale = (payload["sample_params"].get("guidance") or {}).get("txt_cfg", cfg_scale)
+    if "count" in wf:
+        count = int(wf["count"])
+    if int(payload.get("seed", seed)) < 0:
+        payload["seed"] = random.randint(1, 2 ** 31 - 1)
+    seed = int(payload.get("seed", seed))
 
     out_path = Path(out_dir or cfg_get(cfg, "output.dir") or (Path.cwd() / "output"))
 
@@ -1009,6 +1045,8 @@ def generate(prompt: str = "", cfg: dict | None = None, *, negative_prompt: str 
 
     meta = {
         "app": APP_NAME, "version": VERSION, "prompt": payload["prompt"],
+        "workflow": wf,
+        "payload_sample_params": payload.get("sample_params"),
         "negative_prompt": payload["negative_prompt"], "width": payload["width"],
         "height": payload["height"], "steps": steps, "sampler": sampler,
         "cfg": cfg_scale, "seed": seed, "count": count,
@@ -1026,7 +1064,7 @@ def generate(prompt: str = "", cfg: dict | None = None, *, negative_prompt: str 
         "params": {"prompt": payload["prompt"], "negative_prompt": payload["negative_prompt"],
                    "width": payload["width"], "height": payload["height"],
                    "steps": steps, "sampler": sampler, "cfg": cfg_scale,
-                   "seed": seed, "count": count},
+                   "seed": seed, "count": count, "workflow": wf},
         "model": meta["model"], "attempts": attempts, "notes": notes,
         "elapsed_s": elapsed, "job_id": job_id,
         "engine": {"base": base, "port": port, "detected_by": src},
@@ -1090,6 +1128,18 @@ def _emit(obj) -> None:
     print(json.dumps(obj, ensure_ascii=False, indent=2))
 
 
+def _parse_param_list(items: list[str] | None) -> dict:
+    """Turn repeated ``KEY=VALUE`` CLI arguments into a mapping."""
+    out: dict = {}
+    for raw in items or []:
+        if "=" not in raw:
+            raise BridgeError(f"--param expects KEY=VALUE, got {raw!r}", "bad_arguments",
+                              "example: --param cfg=3.5")
+        key, val = raw.split("=", 1)
+        out[key.strip()] = val.strip()
+    return out
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         prog="locmodel_image.py",
@@ -1105,6 +1155,12 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("discover", help="re-discover the engine port")
     sub.add_parser("models", help="list models reported by the engine")
     sub.add_parser("doctor", help="self-check environment, engine and output path")
+    pr = sub.add_parser("params", help="show / set / reset workflow parameters")
+    pr.add_argument("action", nargs="?", default="list",
+                    choices=["list", "show", "set", "reset"],
+                    help="list (default) | set with --param | reset everything")
+    pr.add_argument("--param", action="append", metavar="KEY=VALUE")
+    pr.add_argument("--all", action="store_true", help="include folded parameter groups")
 
     g = sub.add_parser("generate", help="submit a generation job and wait for the result")
     g.add_argument("--prompt", required=True)
@@ -1116,7 +1172,10 @@ def main(argv: list[str] | None = None) -> int:
     g.add_argument("--sampler")
     g.add_argument("--cfg", type=float, dest="cfg_scale")
     g.add_argument("--seed", type=int, default=-1)
-    g.add_argument("--count", type=int, default=1)
+    g.add_argument("--count", type=int)
+    g.add_argument("--param", action="append", metavar="KEY=VALUE",
+                   help="workflow parameter override, repeatable "
+                        "(e.g. --param cfg=3.5 --param scheduler=karras)")
     g.add_argument("--model", help="model name override (multi-model engines)")
     g.add_argument("--out", dest="out_dir")
     g.add_argument("--prefix", default="locmodel")
@@ -1210,6 +1269,26 @@ def main(argv: list[str] | None = None) -> int:
             path = cfg_get(cfg, "engine.models_path", "/sdapi/v1/sd-models")
             code, obj = http_json(base + path, timeout=10)
             _emit({"ok": code == 200, "port": port, "models": obj})
+        elif args.cmd == "params":
+            base_p, port_p, src_p = base_url(cfg=cfg)
+            caps_p = capabilities(base_p, cfg) if port_p else {}
+            act = args.action
+            if act in ("list", "show"):
+                _emit({"ok": True, "version": VERSION,
+                       "engine": {"port": port_p, "detected_by": src_p},
+                       "core": workflow.table(caps_p, workflow.session_get(),
+                                              include_folded=args.all),
+                       "folded_groups": workflow.FOLDED_GROUPS,
+                       "session": workflow.session_get(),
+                       "note": "defaults come from the engine (/sdcpp/v1/capabilities); "
+                               "source=engine means live, source=tool means a built-in fallback"})
+                return 0
+            if act == "set":
+                _emit({"ok": True, "session": workflow.session_set(
+                    _parse_param_list(args.param))})
+                return 0
+            _emit({"ok": True, "reset": True, "session": workflow.session_reset()})
+            return 0
         elif args.cmd == "generate":
             res = generate(
                 args.prompt, cfg,
@@ -1218,7 +1297,8 @@ def main(argv: list[str] | None = None) -> int:
                 cfg_scale=args.cfg_scale, seed=args.seed, count=args.count,
                 out_dir=args.out_dir, filename_prefix=args.prefix,
                 timeout=args.timeout, retry=args.retry, guard=not args.no_guard,
-                model=args.model, dry_run=args.dry_run,
+                model=args.model, params=_parse_param_list(args.param),
+                dry_run=args.dry_run,
             )
             _emit(res)
             return 0 if res.get("ok") else _EXIT["generation_failed"]

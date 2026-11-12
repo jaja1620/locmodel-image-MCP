@@ -52,7 +52,7 @@ else:
     _EDIT_IMPORT_ERROR = None
 
 SERVER_NAME = "locmodel-image"
-SERVER_VERSION = core.VERSION if core else "3.0.0"
+SERVER_VERSION = core.VERSION if core else "3.1.0"
 SUPPORTED_PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
 DEFAULT_PROTOCOL_VERSION = "2024-11-05"
 
@@ -103,6 +103,23 @@ def _generate_schema() -> dict:
             },
             "filename_prefix": {"type": "string", "description": "Semantic filename prefix, e.g. architecture_court."},
             "model": {"type": "string", "description": "Model override for multi-model engines."},
+            "cfg": {"type": "number", "description": "Guidance / CFG scale for this call. Same as params.cfg."},
+            "params": {
+                "type": "object",
+                "additionalProperties": True,
+                "description": (
+                    "Any workflow parameter, applied to THIS call only. Names: cfg, img_cfg, "
+                    "steps, sampler, scheduler, flow_shift, shifted_timestep, eta, "
+                    "distilled_guidance, slg_scale, clip_skip, strength, seed, count. "
+                    "Folded groups: slg_layers/slg_layer_start/slg_layer_end, "
+                    "hires_enabled/hires_upscaler/hires_target_width/hires_target_height/"
+                    "hires_steps/hires_denoising_strength/hires_upscale_tile_size, "
+                    "vae_tiling/vae_tile_size_w/vae_tile_size_h/vae_target_overlap/"
+                    "vae_temporal_tiling, high_noise_steps/high_noise_cfg/high_noise_sampler, "
+                    "custom_sigmas/extra_sample_args/lora. Values travel in the HTTP payload "
+                    "only -- nothing is written to LocModel's config."
+                ),
+            },
             "timeout_s": {"type": "integer", "description": "Job timeout in seconds."},
         },
         "required": ["prompt"],
@@ -299,7 +316,75 @@ def _redraw_schema() -> dict:
     }
 
 
+def _set_params_schema() -> dict:
+    return {
+        "type": "object",
+        "properties": {
+            "params": {
+                "type": "object",
+                "additionalProperties": True,
+                "description": (
+                    "Parameter names and values to remember for the rest of this session, "
+                    "e.g. {\"cfg\": 3.5, \"scheduler\": \"karras\", \"steps\": 12}. "
+                    "Applies to every later generate_image / edit_image / redraw_image call "
+                    "that does not set the same knob itself. Lives in the MCP process memory "
+                    "only: nothing is written to disk, and it disappears when the MCP "
+                    "process restarts."
+                ),
+            },
+            "merge": {"type": "boolean", "description": "true (default) adds to the current set, false replaces it."},
+        },
+        "required": ["params"],
+    }
+
+
+def _get_params_schema() -> dict:
+    return {
+        "type": "object",
+        "properties": {
+            "include_folded": {"type": "boolean", "description": "Also list the folded groups (hires, vae_tiling, high_noise, raw, slg)."},
+            "live_defaults": {"type": "boolean", "description": "Read defaults from the running engine instead of the built-in fallback table."},
+        },
+    }
+
+
 TOOLS += [
+    {
+        "name": "set_workflow_params",
+        "description": (
+            "Remember workflow parameters for the rest of this session (CFG, steps, sampler, "
+            "scheduler, flow_shift, eta, hi-res fix, VAE tiling, LoRA ...). Use it for batch "
+            "runs where every image shares the same look, instead of repeating params on each "
+            "call. Values are sent in the HTTP payload per job -- they never touch LocModel's "
+            "config.json, which the GUI rewrites. Returns the effective parameter table with "
+            "defaults, ranges and the source of each default. Call reset_workflow_params to "
+            "drop everything and fall back to the LocModel GUI panel settings."
+        ),
+        "inputSchema": _set_params_schema(),
+    },
+    {
+        "name": "get_workflow_params",
+        "description": (
+            "List every workflow parameter this tool accepts, with its default value, valid "
+            "range / options, the payload path it maps to, and whether the default came from "
+            "the live engine or from the built-in fallback. Use it before setting parameters "
+            "so you do not guess a name or a range."
+        ),
+        "inputSchema": _get_params_schema(),
+    },
+    {
+        "name": "reset_workflow_params",
+        "description": (
+            "Clear the session parameter set (all of it, or the listed keys) so generation goes "
+            "back to the LocModel GUI panel settings. This is the one-command restore."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "keys": {"type": "array", "items": {"type": "string"}, "description": "Only clear these names; omit to clear everything."}
+            },
+        },
+    },
     {
         "name": "edit_image",
         "description": (
@@ -379,6 +464,20 @@ def _require_core() -> str | None:
     return None
 
 
+def _wf_table(cfg: dict, include_folded: bool = False, live: bool = True) -> list:
+    """Parameter table for the caller, with live engine defaults when reachable."""
+    caps: dict = {}
+    if live:
+        try:
+            base, port, _src = core.base_url(cfg=cfg)
+            if port:
+                caps = core.capabilities(base, cfg) or {}
+        except Exception:  # engine down is not an error for a documentation call
+            caps = {}
+    return core.workflow.table(caps, core.workflow.session_get(),
+                               include_folded=include_folded)
+
+
 def call_tool(name: str, args: dict) -> dict:
     missing = _require_core()
     if missing:
@@ -400,6 +499,8 @@ def call_tool(name: str, args: dict) -> dict:
                 aspect=args.get("aspect"),
                 steps=args.get("steps"),
                 sampler=args.get("sampler"),
+                cfg_scale=args.get("cfg"),
+                params=args.get("params"),
                 seed=int(args.get("seed", -1)),
                 count=int(args.get("count", 1)),
                 out_dir=args.get("output_dir"),
@@ -423,11 +524,52 @@ def call_tool(name: str, args: dict) -> dict:
                  f"elapsed: {res['elapsed_s']}s"]
         for f in res["files"]:
             lines.append(f"path: {f['path']}")
+        wf = (res.get("params") or {}).get("workflow") or {}
+        if wf:
+            lines.append("workflow: " + ", ".join(f"{k}={v}" for k, v in wf.items()))
         if res.get("notes"):
             lines.append("notes: " + " | ".join(res["notes"]))
         out = dict(res)
         out["summary"] = "\n".join(lines)
         return _text(out)
+
+    if name == "set_workflow_params":
+        raw = (args or {}).get("params")
+        if not isinstance(raw, dict) or not raw:
+            return _error("Missing required argument: params (an object of name -> value).")
+        try:
+            session = core.workflow.session_set(raw, merge=bool(args.get("merge", True)))
+        except core.workflow.ParamError as exc:
+            return _error(exc.message, exc.hint)
+        rows = _wf_table(cfg, include_folded=True)
+        lines = ["session parameters now active for this MCP session:"]
+        for key, val in session.items():
+            lines.append(f"  {key} = {val}")
+        lines.append("these win over the LocModel panel settings until reset or restart")
+        return _text({"ok": True, "session": session, "params": rows,
+                      "summary": "\n".join(lines)})
+
+    if name == "get_workflow_params":
+        rows = _wf_table(cfg, include_folded=bool((args or {}).get("include_folded")),
+                         live=bool((args or {}).get("live_defaults", True)))
+        core_rows = [r for r in rows if r["tier"] == "core"]
+        lines = [f"{r['param']} = {r['default']!r}  [{r['source']}]  {r['range']}".rstrip()
+                 for r in core_rows]
+        return _text({"ok": True, "core": core_rows,
+                      "all": rows if (args or {}).get("include_folded") else None,
+                      "folded_groups": core.workflow.FOLDED_GROUPS,
+                      "session": core.workflow.session_get(),
+                      "summary": "\n".join(lines)})
+
+    if name == "reset_workflow_params":
+        keys = (args or {}).get("keys")
+        try:
+            session = core.workflow.session_reset(keys)
+        except core.workflow.ParamError as exc:
+            return _error(exc.message, exc.hint)
+        return _text({"ok": True, "session": session,
+                      "summary": "session parameters cleared; generation is back to the "
+                                 "LocModel GUI panel settings"})
 
     if name == "locmodel_status":
         try:
