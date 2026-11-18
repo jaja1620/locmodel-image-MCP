@@ -20,6 +20,34 @@ AIGC:
 build/dist/locmodel-image-setup.exe
 ```
 
+## 构建
+
+```powershell
+python -m pip install pyinstaller
+python -m PyInstaller --noconfirm --clean --onefile --console `
+  --name locmodel-image-setup `
+  --distpath build/dist --workpath build/work --specpath build `
+  --paths installer --collect-submodules locsetup `
+  --add-data "$PWD\scripts\locmodel_image.py;payload/scripts" `
+  --add-data "$PWD\scripts\locmodel_mcp.py;payload/scripts" `
+  --add-data "$PWD\scripts\locmodel_edit.py;payload/scripts" `
+  --add-data "$PWD\scripts\locmodel_workflow.py;payload/scripts" `
+  --add-data "$PWD\SKILL.md;payload" `
+  --add-data "$PWD\README.md;payload" `
+  --add-data "$PWD\README.zh-CN.md;payload" `
+  --add-data "$PWD\LICENSE;payload" `
+  --add-data "$PWD\annotator;payload/annotator" `
+  installer/locmodel_image_setup.py
+```
+
+三条硬性约束，踩过就废包：
+
+1. **payload 逐文件列出，不要 `--add-data scripts;payload/scripts`**：整目录会把 `scripts/__pycache__/*.pyc` 一起塞进去。
+2. **`locsetup/runtime_deps.py` 必须在依赖图里**：payload 脚本是运行时从 `_MEIPASS` 加载的，PyInstaller 不会分析它们；漏掉 `urllib.error` 之类的话 exe 能装、能 `list`，但 `--serve` 起来就报 `Core module locmodel_image.py could not be imported`。
+3. **`--specpath build` 时相对路径按 build/ 解析**：`--add-data` 一律用绝对路径，否则报 `Unable to find '...\build\scripts'`。
+
+打包后必做的两件事：用 `PyInstaller.archive.readers.CArchiveReader` 列出条目，确认 payload 齐全且无 `.pyc`；再在沙箱 `LOCALAPPDATA`/`USERPROFILE` 下真实安装，跑 `--version`、`list`、`doctor`、`--serve` 握手（`initialize` → `tools/list` → `locmodel_status` → `generate_image`）。
+
 ## 用法
 
 | 操作 | 命令 |

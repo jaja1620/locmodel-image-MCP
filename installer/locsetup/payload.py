@@ -19,6 +19,7 @@ PAYLOAD_FILES: list[tuple[str, bool]] = [
     ("scripts/locmodel_image.py", True),
     ("scripts/locmodel_mcp.py", True),
     ("scripts/locmodel_edit.py", True),
+    ("scripts/locmodel_workflow.py", True),
     ("SKILL.md", True),
     ("README.md", False),
     ("README.zh-CN.md", False),

@@ -21,6 +21,9 @@ def _add_package_path() -> None:
     here = Path(__file__).resolve().parent
     if str(here) not in sys.path:
         sys.path.insert(0, str(here))
+    # Keep the payload's stdlib imports inside the PyInstaller dependency graph;
+    # the payload itself is loaded from _MEIPASS at runtime and never analysed.
+    from locsetup import runtime_deps  # noqa: F401
 
 
 def main(argv: list[str] | None = None) -> int:

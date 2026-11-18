@@ -54,6 +54,24 @@ assumptions into a hard bug.
 - `Latent(nearest)`-style spellings still work for upscalers via fuzzy matching, but the engine's
   canonical spacing is what gets sent
 
+### Installer
+
+- `locsetup.payload.PAYLOAD_FILES` was missing `scripts/locmodel_workflow.py` since 3.1.0, so an
+  exe built from 3.1/3.2 sources would have installed a payload that cannot import its own core.
+  Added as a mandatory file. The gap was the list, not the check: `stage()` already aborts with
+  `payload incomplete` and `verify()` already flags mandatory files at error level.
+- `installer/locsetup/__init__.py` reported `3.0.0`; it now tracks `pyproject.toml` (3.2.0), so
+  `install-manifest.json` and `VERSION` no longer claim an older release.
+- `locsetup/runtime_deps.py` puts the payload's stdlib imports (`urllib.error`, `http.client`,
+  `ssl`, ...) into the PyInstaller dependency graph. Without it a frozen `--serve` started fine
+  and answered `tools/list`, then failed every call with `Core module locmodel_image.py could not
+  be imported: No module named 'urllib.error'`.
+- Build no longer sweeps `scripts/__pycache__/*.pyc` into the payload; `installer/README.md` now
+  documents the exact PyInstaller command and the three failure modes above.
+- Verified end to end on the frozen build: sandbox install → `--version 3.2.0` → 12 tools →
+  `locmodel_status` against a live 8790 engine → `generate_image` 640×640 (explicit size honoured)
+  → PNG written.
+
 ### Notes
 
 - `generate_video` is still deferred: the engine advertises no video mode in `supported_modes`.
