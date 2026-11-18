@@ -4,6 +4,60 @@ All notable changes to this project are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows [Semantic Versioning](https://semver.org/).
 
+## [3.2.0] — 2026-11-18
+
+Synced with LocModel 3.3.0 / sd-server. The 3.1 contract assumed a fixed engine and hard-coded
+what it could have asked for; 3.3.0 advertises more (`features`, `limits`, `defaults_by_mode`,
+`upscalers` as objects) and spells some enumerations differently, which turned one of those
+assumptions into a hard bug.
+
+### Fixed
+
+- **Latent upscalers were unusable.** The tool hard-coded `Latent(nearest)`; the engine spells it
+  `Latent (nearest)` and answers `400 invalid generation parameters` for the space-less form. All
+  five Latent variants now match, and `adopt_capabilities()` overwrites the enumeration from the
+  live `upscalers` list so a future rename cannot break it again.
+- **Explicit sizes were silently rewritten.** `--width 512 --height 512` came back as 768×768 and
+  anything above 1536 was pulled down. Two size tiers now exist: a caller-supplied width/height is
+  honoured (only the engine's `limits` may clamp it, with a warning), while tool-chosen sizes keep
+  the old area floor / VRAM-tiered long edge.
+- **Fallback defaults contradicted the engine.** The tool fell back to `cfg 7.0 / steps 20`; the
+  shipped flux model runs `cfg 1.0 / steps 4 / euler`. `FALLBACK` now mirrors the engine, and
+  `defaults_by_mode` is read when `defaults` is absent.
+- `count` was capped at 4 while the engine accepts 8; the ceiling now comes from
+  `limits.max_batch_count`.
+- Enum matching is now whitespace/punctuation-insensitive, so `latent(nearest)` and `JPEG` are
+  accepted and normalised to the engine spelling instead of being rejected.
+
+### Added
+
+- `adopt_capabilities()` / `engine_limits()` / `feature_enabled()` / `unsupported_keys()` in
+  `locmodel_workflow.py` — live enumerations, limits and features replace the offline baseline;
+  requesting a knob the loaded model cannot honour produces a note instead of a silent no-op
+- New parameters: `hires_scale` (multiplier upscale), `hires_custom_sigmas`, `output_format`
+  (`png` / `jpeg` / `webp`), `output_compression`, `vae_rel_size_w` / `vae_rel_size_h`,
+  `vae_extra_tiling_args` — 42 parameters total
+- `guard` and `dry_run` are now first-class MCP arguments on `generate_image`, so a caller can
+  inspect the exact payload (`size_policy` included) before spending GPU time
+- `locmodel_status` reports `limits`, `features`, `current_mode`, `supported_modes` and the
+  engine-adopted enumerations
+- `get_workflow_params` marks rows the loaded model cannot use (`unavailable_reason`) and accepts
+  `include_folded=true`
+- Tests: `CapabilityAdoptTests` (10 cases), explicit-size cases in `test_core.py`, and rewritten
+  e2e matrix coverage (`cli.size_policy`, `cli.new_params`, `gen.explicit_640`, `gen.jpeg_output`,
+  `cli.explicit_512`)
+
+### Changed
+
+- `size.hard_max_side` default raised 2048 → 4096 to match `limits.max_width/height`
+- `generate.max_count` default raised 4 → 8
+- `Latent(nearest)`-style spellings still work for upscalers via fuzzy matching, but the engine's
+  canonical spacing is what gets sent
+
+### Notes
+
+- `generate_video` is still deferred: the engine advertises no video mode in `supported_modes`.
+
 ## [3.1.0] — 2026-11-12
 
 Workflow parameters reach the engine. Everything the engine accepts in `sample_params`,

@@ -1,7 +1,7 @@
 ---
 name: locmodel-image
 description: 用本机 LocModel（stable-diffusion.cpp / sd-server）的离线画图引擎出图与改图。当用户要求「画一张 / 生成图片 / 出个图 / 给我几张方案草图 / 把这段描述画出来 / 生成配图」，或要求「改这张图 / 把图里的 X 换成 Y / 在图上加个东西 / 只改这块 / 局部重绘 / 在这张图基础上重画」且希望用本机模型、离线处理时使用。覆盖提示词优化、参数选择、掩码标注、局部重绘与整图重画、模型选择与切换、调用入口（MCP 工具或 CLI）、失败排查全流程。不适用：需要精确文字排版的海报（本地扩散模型文字拼写不可靠）、需要联网检索的图、视频生成。
-version: 3.0.0
+version: 3.2.0
 license: MIT
 ---
 
@@ -20,10 +20,11 @@ license: MIT
 ## 能力边界（必须先判断）
 
 可以做：
-- 文生图（txt2img），单张或一次 1–4 张（`--count`）
-- 自定尺寸 / 长宽比（1:1 4:3 3:4 3:2 2:3 16:9 9:16 21:9 2:1 1:2）
+- 文生图（txt2img），单张或一次多张（`--count`，上限取引擎 `limits.max_batch_count`，本机实测 8）
+- 自定尺寸 / 长宽比（1:1 4:3 3:4 3:2 2:3 16:9 9:16 21:9 2:1 1:2）；**显式给 width/height 就按你给的出**，工具不再偷偷放大到 768 或压到 1536
 - 固定 seed 复现、负面提示词、步数 / sampler / CFG 覆盖
-- 输出 PNG + 同名 `_meta.json`（记录 prompt、seed、尺寸、耗时，便于复现）
+- 输出格式 `png` / `jpeg` / `webp`（`output_format`，JPEG/WebP 可配 `output_compression`）+ 同名 `_meta.json`（记录 prompt、seed、尺寸、耗时，便于复现）
+- 二次放大：hires fix 按**倍数**（`hires_scale`）或按**目标尺寸**（`hires_target_width/height`）两种给法
 - **改图**：给定一张已有图片，用一句话指定"这块改成什么"（局部重绘 / inpaint），或"整体按新描述重画"（`redraw`）
 - 掩码来源三选一：掩码 PNG、矩形 / 多边形坐标、按颜色阈值选区域；掩码外的像素由 CPU 侧还原为原图，不会被改动
 - 模型选择：自动按优先级挑可编辑模型，也能指定具体模型或让引擎先加载
@@ -101,20 +102,20 @@ license: MIT
 | --- | --- | --- | --- |
 | 尺寸与内容 | `width` `height` `aspect` `negative_prompt` `prompt` | 工具入参 | 否 |
 | 生成工作流（核心 14 项） | 见下表，直接展开 | 单次 `params={...}` 或会话 `set_workflow_params` | 否，只在 HTTP payload |
-| 折叠组 | hires / vae_tiling / high_noise / slg / raw(lora) | 同上，用户确需调整时再展开 | 否，只在 HTTP payload |
+| 折叠组 | hires / vae_tiling / output / high_noise / slg / raw(lora) | 同上，用户确需调整时再展开 | 否，只在 HTTP payload |
 
 **铁律**：工作流参数一律走 HTTP payload，**永远不要去改 LocModel 的 `config.json`**。
 GUI 用自己的面板状态把该文件回写覆盖，改完当场就被抹掉，还会让用户以为改动生效了。
 
-尺寸守卫段（见下）照旧由面积校验负责，工作流参数不参与尺寸校正。
+尺寸由宽度高度入参决定，工作流参数不参与尺寸校正；尺寸口子见下面「尺寸策略」。
 
 ### 核心参数（14 项，默认值仅供参考）
 
 | 参数 | 默认 | 取值 | 一句话 |
 | --- | --- | --- | --- |
-| **`cfg`**（别名 `cfg_scale`、`txt_cfg`） | 引擎面板值（常见 7.0） | 0–30 | 1.0–1.5 保构图；2.0+ 更贴提示词但易过曝 |
+| **`cfg`**（别名 `cfg_scale`、`txt_cfg`） | 引擎面板值（flux 系实测 1.0，SD 系常见 7.0） | 0–30 | 1.0–1.5 保构图；2.0+ 更贴提示词但易过曝 |
 | **`img_cfg`** | 空（关闭） | 0–30 | 图像条件分支的 CFG，图生图时才用 |
-| **`steps`**（`sample_steps`） | 引擎面板值（常见 20） | 1–200 | turbo/flow 模型 8–12 就够；>30 收益看不见、时间翻倍 |
+| **`steps`**（`sample_steps`） | 引擎面板值（flux 蒸馏系实测 4，SD 系常见 20） | 1–200 | turbo/flow 模型 4–12 就够；>30 收益看不见、时间翻倍 |
 | **`sampler`**（`sample_method`） | 引擎面板值（常见 euler） | 22 种，见 `params list` | 不指定就别指定；`dpm++2m` 是通用升级项 |
 | **`scheduler`** | `default` | 19 种，见 `params list` | `karras`/`beta` 更锐，`sgm_uniform` 更顺；`default` 由引擎按模型映射 |
 | **`flow_shift`** | 空（自动） | 0–100 | flow matching 模型的低频结构权重，2–5 有感知 |
@@ -125,34 +126,47 @@ GUI 用自己的面板状态把该文件回写覆盖，改完当场就被抹掉�
 | **`clip_skip`** | -1 | -64–12 | -1 = 引擎默认（通常跳 1 层） |
 | **`strength`** | 0.75 | 0–1 | 仅改图/图生图：0.35 微调、0.75 常规、1.0 忽略原图 |
 | **`seed`** | -1（随机） | -1 或整数 | 复现、A/B 对比必固定 |
-| **`count`** | 1 | 1–8（受 `generate.max_count` 约束） | 显存不足时别超 2 |
+| **`count`** | 1 | 1–8（取引擎 `limits.max_batch_count`） | 显存不足时别超 2 |
 
 默认值随模型和面板变，**不要背数字**，用 `params list` / `get_workflow_params` 读实时值：
 `source=engine` 表示从 `/sdcpp/v1/capabilities` 读到，`source=tool` 表示引擎没报、用内置兜底。
 
 ### 折叠组（默认不动，确需调整再展开）
 
-<details><summary>hires fix：二次放大（7 项）</summary>
+<details><summary>hires fix：二次放大（9 项）</summary>
 
 | 参数 | 默认 | 取值 | 说明 |
 | --- | --- | --- | --- |
 | `hires_enabled` | false | true/false | 关时其余 hires 参数不生效 |
-| `hires_upscaler` | 引擎值 | Lanczos / Nearest / Latent(…) 等 | Latent 系保细节，Lanczos 最快 |
-| `hires_target_width` / `hires_target_height` | 引擎值 | 64–8192 | 目标尺寸，上限受引擎 `max_upscale_*` 约束 |
-| `hires_steps` | 引擎值 | 1–200 | 第二遍步数 |
-| `hires_denoising_strength` | 引擎值 | 0–1 | 0.3–0.5 保原图，>0.6 开始重画 |
-| `hires_upscale_tile_size` | 0 | 0–4096 | 大图分块放大，0 = 不分块 |
+| `hires_upscaler` | 引擎值 | `None` `Lanczos` `Nearest` `Latent` `Latent (nearest)` `Latent (nearest-exact)` `Latent (antialiased)` `Latent (bicubic)` `Latent (bicubic antialiased)` | **照抄引擎拼写，Latent 系括号前有空格**；工具会做模糊匹配，但别自己发明写法。Latent 系保细节，Lanczos 最快 |
+| `hires_scale` | 2.0 | 1–8 | 按倍数放大，2.0 = 边长翻倍、像素 4 倍；与 `hires_target_*` 二选一，给了目标尺寸就以目标尺寸为准 |
+| `hires_target_width` / `hires_target_height` | 0（不指定） | 64–8192 | 目标尺寸，上限受引擎 `limits.max_upscale_*` 约束（本机 8192） |
+| `hires_steps` | 0（=沿用主步数） | 1–200 | 第二遍步数 |
+| `hires_denoising_strength` | 0.7 | 0–1 | 0.3–0.5 保原图，>0.6 开始重画 |
+| `hires_upscale_tile_size` | 128 | 0–4096 | 大图分块放大，0 = 不分块 |
+| `hires_custom_sigmas` | 空 | sigma 列表 | 自定义第二遍噪声表，一般不动 |
 
 </details>
 
-<details><summary>VAE tiling：低显存救命键（5 项）</summary>
+<details><summary>VAE tiling：低显存救命键（8 项）</summary>
 
 | 参数 | 默认 | 取值 | 说明 |
 | --- | --- | --- | --- |
 | `vae_tiling` | false | true/false | 大画布 OOM 时先开这个 |
 | `vae_tile_size_w` / `vae_tile_size_h` | 0 | 0–4096 | 0 = 引擎自选 |
+| `vae_rel_size_w` / `vae_rel_size_h` | 0.0 | 0–1 | 按画布比例切块，与上面的绝对尺寸二选一 |
+| `vae_extra_tiling_args` | 空 | 键值对 | 引擎新增的透传口，非必要不用 |
 | `vae_target_overlap` | 0.5 | 0–1 | 拼缝处重叠比例，太低会出接缝 |
 | `vae_temporal_tiling` | false | true/false | 视频模型用；图片任务保持关闭 |
+
+</details>
+
+<details><summary>output：输出格式（2 项）</summary>
+
+| 参数 | 默认 | 取值 | 说明 |
+| --- | --- | --- | --- |
+| `output_format` | png | `png` / `jpeg` / `webp` | 要小体积交付（PPT、微信传图）用 `jpeg`；需要透明底必须留 `png` |
+| `output_compression` | 100 | 0–100 | 仅 jpeg/webp 有意义，80–90 肉眼无损、体积减半 |
 
 </details>
 
@@ -197,11 +211,17 @@ GUI 用自己的面板状态把该文件回写覆盖，改完当场就被抹掉�
 **默认行为**：用户没点名要调参数时，**不要主动设置任何工作流参数**，一切按 LocModel
 GUI 面板的现有设置出图。参数是用户提要求时才启用的开关，不是每次都要填的表。
 
-**尺寸守卫（按总像素面积，不按单边）**：引擎对过小的图会失败（512×512 实测报 `no results`），对过大的图会 OOM。
-- 下限 `size.min_area`（默认 768² ≈ 59 万像素），小于则**等比放大**，保留用户长宽比
-- 上限 `size.max_side`（默认 1536，且随显存自动调整），超过则等比缩小
-- 边长对齐 `size.multiple`（默认 8）
-- 确实要原样发送 → `--no-guard`（自担风险）
+**尺寸策略（两档，先看用户有没有给数）**：
+
+| 情形 | 工具怎么做 | 你要说什么 |
+| --- | --- | --- |
+| 用户**给了** width/height | **按给的数原样出**（只做 8 的倍数对齐）。只有超出引擎硬限（`limits.max_width/max_height`，本机 4096；下限 64）才缩回，并留 warning | 原话照给即可；若回执带显存警告，转述"这张会吃 ~X GB，可能爆显存" |
+| 用户**没给**、走 `aspect` 预设 | 工具自己算：下限 `size.min_area`（默认 768² ≈ 59 万像素），上限 `size.max_side`（默认 1536，随显存自动调整），边长对齐 8 | 说明按 A 比例出的是多少像素 |
+
+- 显存估算：`vram_mb_per_mp`（默认 1600 MB/百万像素）对比可用显存，超了只**警告**、不偷偷改尺寸
+- 想要工具自己做面积兜底（老行为）→ 显式尺寸 + `guard=true`（MCP）/ 去掉 `--no-guard`（CLI）
+- 确实要原样发送、连引擎硬限也不管 → `guard=false`（引擎侧仍可能 400，自担风险）
+- 小画布（< 59 万像素）引擎有时返回 `no results`，回执会提示，失败就抬尺寸重试
 
 ## 调用方式
 
@@ -215,7 +235,12 @@ generate_image(prompt="...", params={"cfg": 3.5, "scheduler": "karras"})
 # 本会话后续全部生效
 set_workflow_params(params={"cfg": 3.5, "steps": 12})
 get_workflow_params()            # 看实时默认值、取值范围、来源
+get_workflow_params(include_folded=true)   # 连折叠组一起看（hires / vae / output ...）
 reset_workflow_params()          # 一条命令全部恢复默认
+
+# 尺寸：给了就按给的数出；只想看将发送什么，先 dry_run
+generate_image(prompt="...", width=2048, height=1152, out_dir="<目录>")
+generate_image(prompt="...", width=2048, height=1152, dry_run=true)   # 只回 payload + 显存警告
 ```
 
 CLI：
@@ -229,7 +254,7 @@ python scripts/locmodel_image.py status
 python scripts/locmodel_image.py doctor
 ```
 
-输出：`<out>/locmodel_<YYYYmmdd_HHMMSS>_<i>_seed<seed>.png` + `_meta.json`。
+输出：`<out>/locmodel_<YYYYmmdd_HHMMSS>_<i>_seed<seed>.<ext>` + `_meta.json`，扩展名随 `output_format`（png / jpg / webp）。
 
 **落盘位置**：优先当前会话的结果产物目录（output），不要写桌面或系统临时目录。
 
@@ -345,8 +370,8 @@ python scripts/locmodel_image.py generate --prompt "test" --aspect 1:1 --dry-run
 
 # 配置读写
 python scripts/locmodel_image.py config show
-python scripts/locmodel_image.py config get size.max_side
-python scripts/locmodel_image.py config set size.max_side 1280
+python scripts/locmodel_image.py config get size.min_area
+python scripts/locmodel_image.py config set size.min_area 589824
 python scripts/locmodel_image.py config path
 
 # 强制重新发现端口
@@ -362,6 +387,7 @@ python scripts/locmodel_image.py load-model "Qwen-Image-Edit"
 
 ## 给用户的交付话术
 
-- 出图后列出**真实生成的 PNG 绝对路径**（不要虚构），批量时说明每张 seed 便于复现
-- 若参数被守卫自动调整过，明确说明"你要 512×512，已按引擎下限放大到 768×768"
+- 出图后列出**真实生成的图片绝对路径**（不要虚构），批量时说明每张 seed 便于复现
+- 尺寸按用户给的原样出时，明确说"就是 512×512"；只有超出引擎硬限（4096）或显存不够才提示，且说清是**警告还是已改尺寸**
+- 若开了 hires，说明是"按 2 倍放大"还是"放大到 2048×1152"，并给出实际产出像素
 - 失败时给出具体下一步（关哪个程序、改哪个参数），不要只说"失败了"

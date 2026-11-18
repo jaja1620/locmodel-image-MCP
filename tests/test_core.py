@@ -113,6 +113,42 @@ def test_size_policy_follows_vram(cfg):
     assert low["max_side"] < high["max_side"] <= core.DEFAULTS["size"]["hard_max_side"]
 
 
+# --- v3.2 explicit-size contract ------------------------------------------
+# An explicit width/height belongs to the caller: honour it, warn about VRAM,
+# and only the engine's own limits may clamp it.
+
+def test_explicit_small_size_is_honoured(cfg):
+    w, h, notes = core.normalize_size(512, 512, cfg, explicit=True)
+    assert (w, h) == (512, 512)
+    assert notes and "honoured" in notes[0]
+
+
+def test_explicit_size_may_exceed_tool_ceiling(cfg):
+    w, h, notes = core.normalize_size(2048, 1152, cfg, explicit=True)
+    assert (w, h) == (2048, 1152)
+    assert any("1536" in n for n in notes)
+
+
+def test_explicit_size_clamped_by_engine_limits(cfg):
+    limits = {"min_width": 64, "min_height": 64, "max_width": 4096, "max_height": 4096}
+    w, h, notes = core.normalize_size(5000, 5000, cfg, explicit=True, limits=limits)
+    assert (w, h) == (4096, 4096)
+    assert any("beyond the engine limits" in n for n in notes)
+
+
+def test_explicit_size_still_aligns_to_multiple(cfg):
+    w, h, _ = core.normalize_size(1001, 777, cfg, explicit=True, limits=None)
+    assert (w, h) == (1001, 777) or (w % 8 == 0 and h % 8 == 0)
+
+
+def test_engine_limits_cap_the_policy(cfg):
+    pol = core._size_policy(cfg, None, limits={"min_width": 64, "max_width": 2048,
+                                               "min_height": 64, "max_height": 2048})
+    assert pol["engine"]["max_width"] == 2048
+    assert pol["max_side"] <= 2048
+    assert pol["explicit_respect"] is True
+
+
 @pytest.mark.parametrize("aspect", ["1:1", "16:9", "9:16", "4:3", "2:1"])
 def test_aspect_to_size_roundtrip(aspect):
     w, h = core.aspect_to_size(aspect, 1024 * 1024)

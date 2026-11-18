@@ -38,6 +38,7 @@ exit codes.
 - [Testing](#testing)
 - [Troubleshooting](#troubleshooting)
 - [Compatibility and limitations](#compatibility-and-limitations)
+- [What changed in 3.2](#what-changed-in-32)
 - [What changed in 3.1](#what-changed-in-31)
 - [What changed in 3.0](#what-changed-in-30)
 - [What changed in 2.0](#what-changed-in-20)
@@ -368,7 +369,7 @@ locmodel_image.py [--config PATH] [--verbose] [--log-file PATH] <command> [optio
 | `--prefix` | `locmodel` | Filename prefix |
 | `--timeout` | `generate.timeout` | Seconds per job |
 | `--retry` | `generate.retry` | Retries with a new seed on transient failure |
-| `--no-guard` | off | Send the requested size verbatim |
+| `--no-guard` | off | Force tier-A sizing (send the requested size verbatim) |
 | `--dry-run` | off | Print the HTTP payload and exit — no GPU time spent |
 
 ### `edit` options
@@ -408,7 +409,8 @@ Scripts can branch on the code; agents can branch on the `error` field in the JS
 ## Workflow parameters
 
 Anything the engine's `sample_params`, `hires`, `vae_tiling_params`, `high_noise_sample_params`
-or `lora` blocks accept can be set from this tool as of 3.1. Parameters travel **inside the HTTP
+or `lora` blocks accept can be set from this tool as of 3.2, and the enumerations (samplers,
+schedulers, upscalers, output formats) are adopted from the live engine instead of being hard-coded. Parameters travel **inside the HTTP
 payload only** — never through `config.json`. LocModel owns that file and rewrites it from its own
 panel state, so anything written there is silently reverted; the payload is the only channel that
 actually holds.
@@ -454,17 +456,20 @@ overridden in this process.
 | `clip_skip` | — | -64–12 | -1 = engine default |
 | `strength` | — | 0–1 | edit/img2img only: 0.35 subtle, 0.75 normal |
 | `seed` | — | -1 or int | -1 randomises, fix it for A/B |
-| `count` | — | 1–8 | also capped by `generate.max_count` |
+| `count` | — | 1–8 | also capped by `generate.max_count` and `limits.max_batch_count` |
 
 ### Folded groups
 
 These stay out of the way until a task needs them; `params list --all` prints them with the same
 live defaults.
 
-- **hires** — `hires_enabled`, `hires_upscaler`, `hires_target_width`, `hires_target_height`,
-  `hires_steps`, `hires_denoising_strength`, `hires_upscale_tile_size`
-- **vae via tiling** — `vae_tiling`, `vae_tile_size_w`, `vae_tile_size_h`, `vae_target_overlap`,
-  `vae_temporal_tiling` (18 GB of VRAM not required: turn this on before shrinking the canvas)
+- **hires** — `hires_enabled`, `hires_upscaler` (9 engine names, e.g. `Latent (nearest)`),
+  `hires_scale` (multiplier), `hires_target_width`, `hires_target_height`, `hires_steps`,
+  `hires_denoising_strength`, `hires_upscale_tile_size`, `hires_custom_sigmas`
+- **vae via tiling** — `vae_tiling`, `vae_tile_size_w`, `vae_tile_size_h`, `vae_rel_size_w`,
+  `vae_rel_size_h`, `vae_extra_tiling_args`, `vae_target_overlap`, `vae_temporal_tiling`
+  (18 GB of VRAM not required: turn this on before shrinking the canvas)
+- **output** — `output_format` (`png` / `jpeg` / `webp`) and `output_compression` (0–100)
 - **high noise** — `high_noise_steps`, `high_noise_cfg`, `high_noise_sampler`
 - **slg detail** — `slg_layers`, `slg_layer_start`, `slg_layer_end`
 - **raw passthrough** — `custom_sigmas`, `extra_sample_args`, `lora`
@@ -512,17 +517,19 @@ Keys (defaults shown):
     "probe_timeout": 1.5
   },
   "size": {
-    "min_area": 589824,                // 768x768 — below this, engines fail
+    "min_area": 589824,                // 768x768 — the floor for tool-chosen sizes
     "multiple": 8,                     // align edges to this
     "max_side": 1536,                  // auto-shrinks with VRAM when max_side_auto
     "max_side_auto": true,
-    "hard_max_side": 2048
+    "hard_max_side": 4096,             // engine limits.max_width/height
+    "explicit_respect": true,          // caller-supplied width/height wins over the tiers
+    "vram_mb_per_mp": 1600             // warning threshold per megapixel
   },
   "generate": {
     "timeout": 900,
     "retry": 2,
     "poll_interval": 2.0,
-    "max_count": 4,
+    "max_count": 8,                    // engine limits.max_batch_count
     "max_download_mb": 64,
     "lock": true,
     "lock_wait": 900
@@ -571,17 +578,31 @@ locmodel_image.py config set edit.models_dirs '["F:/AI-Models"]'  # scan when th
 
 ## Sizing and VRAM strategy
 
-The guard protects against the two failure modes that produce misleading errors:
-**too few pixels** (`generate_image returned no results`) and **too many pixels** (OOM / workspace
-capacity check, which on Windows can surface as `ucrtbase.dll 0xc0000409 / BEX64`).
+Two tiers, because the two situations want opposite things: a caller who asked for a specific
+canvas should get that canvas, while a tool that picks the canvas itself should stay inside the
+smooth band.
 
-Rules applied in order:
+**Tier A — the caller supplied `width`/`height` (or `--no-guard` on the CLI).** The numbers are
+sent as asked. Only two things can change them:
+
+1. edges are aligned to `size.multiple` (default 8)
+2. the engine's own `limits` (64 … 4096 per edge, read live) clamp the result — with a warning,
+   never silently
+
+Everything else is advice, not action: below `size.min_area` or above the VRAM heuristic you get a
+warning in `notes` and the image is rendered anyway.
+
+**Tier B — the tool picked the size (`aspect` preset, or no size at all).** The old guard applies:
 
 1. `width`/`height` (or the aspect preset) is normalised to `size.multiple`
 2. total area below `size.min_area` → scaled up proportionally (aspect ratio preserved)
 3. longest edge beyond the effective ceiling → scaled down proportionally
 4. the effective ceiling is `size.max_side`, lowered automatically from measured VRAM when
-   `max_side_auto` is on, never above `hard_max_side`
+   `max_side_auto` is on, never above `hard_max_side` (4096, i.e. the engine limit)
+
+The guard exists because the two failure modes produce misleading errors: **too few pixels**
+(`generate_image returned no results`) and **too many pixels** (OOM / workspace capacity check,
+which on Windows can surface as `ucrtbase.dll 0xc0000409 / BEX64`).
 
 Practical presets:
 
@@ -589,7 +610,7 @@ Practical presets:
 | --- | --- | --- |
 | 4–6 GB | 768×768, 1024×576, `count`=1 | keep `generate.retry` ≥ 1 |
 | 8 GB | 1024×1024, 1280×720, `count`≤2 | the tested sweet spot for turbo models |
-| 12 GB+ | 1536×864, 1536×1536 | raise `size.max_side` explicitly |
+| 12 GB+ | 1536×864, 1536×1536 | raise `size.max_side`; explicit sizes are never capped by it |
 
 One more habit that prevents most mysterious failures: **keep exactly one image engine resident**.
 Running LocModel plus an LM Studio model plus a second diffusion engine on the same GPU is the
@@ -676,12 +697,34 @@ directory writability in one shot.
   port was found.
 - **No model management**: loading/unloading, model switching and VRAM budgeting remain LocModel's
   job. This tool never kills processes or unloads models on your behalf.
-- **Not implemented**: img2img, inpainting, upscaling, video generation. The engine advertises
-  some of these, but they are unverified here — they are deliberately absent rather than
-  half-working.
+- **Not implemented**: standalone upscaling of an existing image, and video generation. Hires-fix
+  upscaling *during* generation is supported (`hires_enabled` + `hires_scale` / `hires_upscaler`);
+  the engine advertises no video mode, so `generate_video` stays out rather than half-working.
 - **Text in images**: a limitation of the models, not of the bridge.
 
 ---
+
+## What changed in 3.2
+
+- **Engine capabilities are adopted, not assumed** — `adopt_capabilities()` overwrites the sampler,
+  scheduler, upscaler, output-format and preview-mode lists from `/sdcpp/v1/capabilities`, reads
+  `limits` (64 … 4096 per edge, batch 8) and `features`. `locmodel_status` reports all of it.
+- **Latent upscalers actually work** — the tool shipped `Latent(nearest)`; the engine spells it
+  `Latent (nearest)` and rejected the space-less form with `400 invalid generation parameters`.
+  Fixed, and enum matching is now whitespace-insensitive, so `latent(nearest)` / `JPEG` normalise.
+- **Explicit sizes are honoured** — two size tiers (see [Sizing and VRAM
+  strategy](#sizing-and-vram-strategy)): a caller-supplied `width`/`height` is sent as asked and only
+  clamped by the engine's own limits, with a warning; tool-chosen sizes keep the area floor and
+  VRAM-tiered ceiling.
+- **Fallback defaults match the engine** — `cfg 1.0 / steps 4 / euler` instead of the old
+  `7.0 / 20`, and `defaults_by_mode` is read when `defaults` is missing.
+- **New parameters** — `hires_scale`, `hires_custom_sigmas`, `output_format`, `output_compression`,
+  `vae_rel_size_w/h`, `vae_extra_tiling_args` (42 total). JPEG/WebP output works; the extension
+  follows `output_format`.
+- **`guard` / `dry_run` on `generate_image`** — inspect the exact payload and `size_policy` before
+  spending GPU time.
+- **Unsupported knobs are reported** — asking for a parameter the loaded model cannot honour
+  produces a note instead of a silent no-op.
 
 ## What changed in 3.1
 

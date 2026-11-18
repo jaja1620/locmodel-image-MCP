@@ -23,9 +23,15 @@ from __future__ import annotations
 
 import copy
 
-VERSION = "3.1.0"
+VERSION = "3.2.0"
 
 # --- enumerations measured on sd-server master-1050 (58bb3c1) ---------------
+# These are the *offline* baseline. Whenever the engine is reachable the real
+# lists from ``/sdcpp/v1/capabilities`` replace them in place (see
+# ``adopt_capabilities``), because a value the engine does not recognise is
+# rejected with HTTP 400 ("invalid generation parameters"). The lists are
+# mutated in place on purpose: SPEC holds references to them, so every later
+# validation / listing call sees the live set without touching SPEC.
 SCHEDULERS = [
     "default", "discrete", "normal", "karras", "exponential", "ays", "gits",
     "sgm_uniform", "simple", "smoothstep", "kl_optimal", "lcm", "bong_tangent",
@@ -37,11 +43,24 @@ SAMPLERS = [
     "res_multistep", "res_2s", "er_sde", "euler_cfg_pp", "euler_a_cfg_pp",
     "euler_ge", "dpm++2m_sde", "dpm++2m_sde_bt", "lms",
 ]
+# The engine spells the Latent variants WITH a space ("Latent (nearest)").
+# v3.1 shipped them without one, so every Latent upscaler was rejected with
+# HTTP 400 and hi-res fix silently fell back to the non-Latent path.
 UPSCALERS = [
-    "None", "Lanczos", "Nearest", "Latent", "Latent(nearest)",
-    "Latent(nearest-exact)", "Latent(antialiased)", "Latent(bicubic)",
-    "Latent(bicubic antialiased)",
+    "None", "Lanczos", "Nearest", "Latent", "Latent (nearest)",
+    "Latent (nearest-exact)", "Latent (antialiased)", "Latent (bicubic)",
+    "Latent (bicubic antialiased)",
 ]
+OUTPUT_FORMATS = ["png", "jpeg", "webp"]
+PREVIEW_MODES = ["none", "proj", "tae", "vae"]
+
+#: engine limits, filled from ``capabilities.limits`` (module-level fallbacks
+#: match the sd-server defaults so the tool still works with an old engine)
+LIMITS = {
+    "min_width": 64, "min_height": 64, "max_width": 4096, "max_height": 4096,
+    "max_batch_count": 8, "max_upscale_width": 8192, "max_upscale_height": 8192,
+}
+FEATURES: dict = {}
 
 # --- the contract -----------------------------------------------------------
 # path     : where the value lands inside the payload
@@ -126,6 +145,15 @@ SPEC: dict[str, dict] = {
     "hires_upscale_tile_size": dict(path=("hires", "upscale_tile_size"), kind="int",
                                     min=0, max=4096, core=False, group="hires",
                                     label="hires upscale tile size"),
+    # v3.2: the engine accepts a multiplier as well as absolute target sizes.
+    # scale is what the GUI slider drives, so expose it directly instead of
+    # making the caller recompute width/height by hand.
+    "hires_scale": dict(path=("hires", "scale"), kind="float", min=1.0, max=8.0,
+                        core=False, group="hires", label="hires scale multiplier",
+                        note="only used when hires_target_width/height stay 0; 2.0 doubles both edges"),
+    "hires_custom_sigmas": dict(path=("hires", "custom_sigmas"), kind="json",
+                                core=False, group="hires",
+                                label="hires custom sigma schedule (list)"),
 
     # ---------------- folded: VAE tiling ----------------------------------
     "vae_tiling": dict(path=("vae_tiling_params", "enabled"), kind="bool",
@@ -137,12 +165,31 @@ SPEC: dict[str, dict] = {
     "vae_tile_size_h": dict(path=("vae_tiling_params", "tile_size_h"), kind="int",
                             min=0, max=4096, core=False, group="vae_tiling",
                             label="tile height"),
+    "vae_rel_size_w": dict(path=("vae_tiling_params", "rel_size_w"), kind="float",
+                           min=0.0, max=1.0, core=False, group="vae_tiling",
+                           label="tile width as a fraction of the image",
+                           note="0 lets the engine pick; 0.5 is the usual safe value"),
+    "vae_rel_size_h": dict(path=("vae_tiling_params", "rel_size_h"), kind="float",
+                           min=0.0, max=1.0, core=False, group="vae_tiling",
+                           label="tile height as a fraction of the image"),
+    "vae_extra_tiling_args": dict(path=("vae_tiling_params", "extra_tiling_args"),
+                                  kind="json", core=False, group="vae_tiling",
+                                  label="extra tiling args (key=value map)"),
     "vae_target_overlap": dict(path=("vae_tiling_params", "target_overlap"),
                                kind="float", min=0.0, max=1.0, core=False,
                                group="vae_tiling", label="tile overlap"),
     "vae_temporal_tiling": dict(path=("vae_tiling_params", "temporal_tiling"),
                                 kind="bool", core=False, group="vae_tiling",
                                 label="temporal tiling (video models)"),
+
+    # ---------------- folded: output --------------------------------------
+    "output_format": dict(path=("output_format",), kind="enum", enum=OUTPUT_FORMATS,
+                          core=False, group="output", label="output file format",
+                          note="png is lossless; jpeg/webp are much smaller for review copies"),
+    "output_compression": dict(path=("output_compression",), kind="int",
+                               min=0, max=100, core=False, group="output",
+                               label="output compression level",
+                               note="only meaningful for jpeg/webp; 100 = best quality"),
 
     # ---------------- folded: high noise (dual-model models) --------------
     "high_noise_steps": dict(path=("high_noise_sample_params", "sample_steps"),
@@ -196,6 +243,11 @@ _FALSE = {"0", "false", "no", "off", "n", "f"}
 _NULL = {"", "null", "none", "auto", "default"}
 
 
+def _squash(text: str) -> str:
+    """Lower-case and drop everything that is not alphanumeric."""
+    return "".join(ch for ch in str(text).lower() if ch.isalnum())
+
+
 def _coerce(key: str, value, spec: dict):
     kind = spec["kind"]
     name = f"{key}={value!r}"
@@ -237,9 +289,16 @@ def _coerce(key: str, value, spec: dict):
         enum = spec["enum"]
         if s in enum:
             return s
+        # exact, then case-insensitive, then punctuation/space-insensitive:
+        # users type "latent(nearest)" while the engine spells it
+        # "Latent (nearest)", and a stricter matcher rejected both spellings
         low = {e.lower(): e for e in enum}
         if s.lower() in low:
             return low[s.lower()]
+        squash = {_squash(e): e for e in enum}
+        hit = squash.get(_squash(s))
+        if hit is not None:
+            return hit
         raise ParamError(f"{name} is not one of the supported values",
                          "supported: " + ", ".join(enum))
 
@@ -390,12 +449,27 @@ _CAPS_PATHS = {
     "count": ("batch_count",),
     "vae_tiling": ("vae_tiling_params", "enabled"),
     "vae_target_overlap": ("vae_tiling_params", "target_overlap"),
+    "vae_rel_size_w": ("vae_tiling_params", "rel_size_w"),
+    "vae_rel_size_h": ("vae_tiling_params", "rel_size_h"),
+    "hires_scale": ("hires", "scale"),
+    "hires_upscaler": ("hires", "upscaler"),
+    "hires_denoising_strength": ("hires", "denoising_strength"),
+    "hires_steps": ("hires", "steps"),
+    "hires_target_width": ("hires", "target_width"),
+    "hires_target_height": ("hires", "target_height"),
+    "output_format": ("output_format",),
+    "output_compression": ("output_compression",),
 }
 
-#: last-resort values, matching upstream sd.cpp defaults
+#: last-resort values, measured on sd-server master-1050 with a flux-2-klein
+#: model loaded (cfg 1.0 / 4 steps / euler). v3.1 shipped 7.0 / 20 here, which
+#: is an SD1.5-era pair and made the tool look wrong on every modern engine.
+#: The engine's own ``defaults`` block always wins over these; they only matter
+#: when it cannot be reached at all.
 FALLBACK = {
-    "cfg": 7.0, "steps": 20, "sampler": "default", "scheduler": "default",
-    "flow_shift": None, "eta": None, "distilled_guidance": 3.5,
+    "cfg": 1.0, "img_cfg": None, "steps": 4, "sampler": "euler",
+    "scheduler": "default", "flow_shift": None, "eta": None,
+    "distilled_guidance": 3.5, "slg_scale": 0.0,
     "clip_skip": -1, "strength": 0.75, "seed": 42, "count": 1,
 }
 
@@ -411,8 +485,20 @@ def _dig(obj, path):
 
 def defaults_from_capabilities(caps: dict | None) -> dict:
     """Read live defaults. The engine spells the guidance block 'guided' in
-    capabilities while the request body uses 'guidance', so try both."""
-    d = (caps or {}).get("defaults") or {}
+    capabilities while the request body uses 'guidance', so try both.
+
+    v3.3.0 also ships ``defaults_by_mode``: when the engine is running in a
+    specific mode (``img_gen``, ``img2img`` ...) that block is the authoritative
+    one and the flat ``defaults`` is only the fallback.
+    """
+    caps = caps or {}
+    d = caps.get("defaults") or {}
+    mode = caps.get("current_mode")
+    by_mode = caps.get("defaults_by_mode") or {}
+    if mode and isinstance(by_mode.get(mode), dict):
+        merged = dict(d)
+        merged.update(by_mode[mode])
+        d = merged
     flat: dict = {}
     for key, path in _CAPS_PATHS.items():
         val = _dig(d, path)
@@ -423,6 +509,110 @@ def defaults_from_capabilities(caps: dict | None) -> dict:
     return flat
 
 
+def adopt_capabilities(caps: dict | None) -> dict:
+    """Replace the offline enumerations / limits with the live engine ones.
+
+    Called by every entry point that has a ``capabilities`` dict in hand. The
+    lists are updated **in place** so that SPEC's enum references keep pointing
+    at the live data (a rebound list would leave SPEC validating against the
+    stale baseline forever, which is exactly the v3.1 upscaler bug).
+    Returns a small summary so callers can log / report what was adopted.
+    """
+    caps = caps or {}
+    adopted: dict = {}
+
+    def _sync(label: str, target: list, live) -> None:
+        if not isinstance(live, list) or not live:
+            return
+        vals = []
+        for item in live:
+            if isinstance(item, dict):
+                item = item.get("name")
+            if isinstance(item, str) and item and item not in vals:
+                vals.append(item)
+        if not vals:
+            return
+        # the engine accepts "default" for both sampler and scheduler (it is
+        # the shipped scheduler default) but does not list it among the values,
+        # so keep it when the baseline had it instead of dropping a valid word
+        if "default" in target and "default" not in vals:
+            vals.insert(0, "default")
+        if vals != target:
+            target[:] = vals
+            adopted[label] = len(vals)
+
+    _sync("samplers", SAMPLERS, caps.get("samplers"))
+    _sync("schedulers", SCHEDULERS, caps.get("schedulers"))
+    _sync("output_formats", OUTPUT_FORMATS, caps.get("output_formats"))
+    _sync("preview_modes", PREVIEW_MODES, caps.get("preview_modes"))
+    # upscalers arrive as [{"name": ..., "model": bool, "image_upscale": bool}]
+    _sync("upscalers", UPSCALERS, caps.get("upscalers"))
+
+    lim = caps.get("limits")
+    if isinstance(lim, dict):
+        changed = {}
+        for key in list(LIMITS):
+            val = lim.get(key)
+            if isinstance(val, int) and val > 0 and val != LIMITS[key]:
+                LIMITS[key] = val
+                changed[key] = val
+        if changed:
+            adopted["limits"] = len(changed)
+
+    # ``features`` carries the coarse switches (hires, vae_tiling, lora ...),
+    # ``generation_features`` the per-knob ones. Merge both, coarse first, so a
+    # key present in only one of them is still known; only real booleans count,
+    # anything else stays unknown instead of being reported as disabled.
+    merged: dict = {}
+    for block in (caps.get("features"), caps.get("generation_features")):
+        if isinstance(block, dict):
+            for key, val in block.items():
+                if isinstance(val, bool):
+                    merged[key] = val
+    if merged and merged != FEATURES:
+        FEATURES.clear()
+        FEATURES.update(merged)
+        adopted["features"] = len(merged)
+
+    return adopted
+
+
+def feature_enabled(feature: str) -> bool | None:
+    """True/False when the engine reported the feature, None when unknown."""
+    if not feature or feature not in FEATURES:
+        return None
+    return bool(FEATURES[feature])
+
+
+#: which engine feature switch has to be on for a parameter to do anything
+_KEY_FEATURE = {
+    "hires_enabled": "hires", "hires_upscaler": "hires", "hires_scale": "hires",
+    "hires_steps": "hires", "hires_target_width": "hires",
+    "hires_target_height": "hires", "hires_denoising_strength": "hires",
+    "hires_upscale_tile_size": "hires", "hires_custom_sigmas": "hires",
+    "vae_tiling": "vae_tiling", "vae_tile_size_w": "vae_tiling",
+    "vae_tile_size_h": "vae_tiling", "vae_rel_size_w": "vae_tiling",
+    "vae_rel_size_h": "vae_tiling", "vae_target_overlap": "vae_tiling",
+    "vae_temporal_tiling": "vae_tiling", "vae_extra_tiling_args": "vae_tiling",
+    "lora": "lora", "clip_skip": "clip_skip", "flow_shift": "flow_shift",
+    "shifted_timestep": "shifted_timestep", "slg_scale": "slg",
+    "slg_layers": "slg", "slg_layer_start": "slg", "slg_layer_end": "slg",
+    "img_cfg": "img_cfg", "distilled_guidance": "distilled_guidance",
+    "high_noise_steps": "high_noise", "high_noise_cfg": "high_noise",
+    "high_noise_sampler": "high_noise",
+}
+
+
+def unsupported_keys(keys) -> list[str]:
+    """Which requested knobs the loaded model cannot honour (warn, never drop)."""
+    out: list[str] = []
+    for key in keys or ():
+        feat = _KEY_FEATURE.get(key)
+        if feat and feature_enabled(feat) is False:
+            out.append(key)
+    return out
+
+
 def effective_defaults(caps: dict | None = None, session: dict | None = None) -> dict:
     """Engine value -> fallback -> session override, with the source recorded."""
     live = defaults_from_capabilities(caps)
@@ -430,7 +620,7 @@ def effective_defaults(caps: dict | None = None, session: dict | None = None) ->
     for key in SPEC:
         if key in live:
             out[key] = {"value": live[key], "source": "engine"}
-        elif key in FALLBACK:
+        elif key in FALLBACK and FALLBACK[key] is not None:
             out[key] = {"value": FALLBACK[key], "source": "tool"}
         elif "default" in SPEC[key]:
             out[key] = {"value": SPEC[key]["default"], "source": "tool"}
@@ -463,8 +653,21 @@ def table(caps: dict | None = None, session: dict | None = None,
             row["note"] = spec["note"]
         if spec.get("enum"):
             row["options"] = list(spec["enum"])
+        feat = _KEY_FEATURE.get(key)
+        if feat:
+            avail = feature_enabled(feat)
+            if avail is False:
+                row["available"] = False
+                row["unavailable_reason"] = (
+                    f"the engine reports {feat}=false for the loaded model, "
+                    "so this knob will be accepted but has no effect")
         rows.append(row)
     return rows
+
+
+def engine_limits() -> dict:
+    """Live size / batch limits (from capabilities.limits when reachable)."""
+    return dict(LIMITS)
 
 
 def _range_text(spec: dict) -> str:

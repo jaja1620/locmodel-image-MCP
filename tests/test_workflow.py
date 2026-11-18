@@ -132,5 +132,109 @@ class DefaultsTests(unittest.TestCase):
         self.assertLessEqual(len(wf.CORE_KEYS), 16)
 
 
+class CapabilityAdoptTests(unittest.TestCase):
+    """v3.2: the live /sdcpp/v1/capabilities payload drives every enumeration."""
+
+    CAPS = {
+        "current_mode": "img_gen",
+        "supported_modes": ["img_gen"],
+        "limits": {"min_width": 64, "min_height": 64, "max_width": 4096,
+                   "max_height": 4096, "max_batch_count": 8,
+                   "max_upscale_width": 8192, "max_upscale_height": 8192},
+        "output_formats": ["png", "jpeg", "webp"],
+        "preview_modes": ["none", "proj", "tae", "vae"],
+        "upscalers": [
+            {"name": "None", "model": False}, {"name": "Lanczos", "model": False},
+            {"name": "Latent", "model": False}, {"name": "Latent (nearest)", "model": False},
+            {"name": "Latent (nearest-exact)", "model": False},
+            {"name": "Latent (antialiased)", "model": False},
+            {"name": "Latent (bicubic)", "model": False},
+            {"name": "Latent (bicubic antialiased)", "model": False},
+        ],
+        "samplers": ["euler", "dpm++2m", "lcm"],
+        "schedulers": ["default", "karras", "beta"],
+        "features": {"hires": True, "vae_tiling": True, "lora": False},
+        "generation_features": {"clip_skip": True, "flow_shift": True, "img2img": True},
+        "defaults_by_mode": {"img_gen": {"sample_params": {"sample_steps": 4, "sample_method": "euler"}}},
+    }
+
+    def setUp(self):
+        self._snap = {name: list(getattr(wf, name)) for name in
+                      ("SAMPLERS", "SCHEDULERS", "UPSCALERS", "OUTPUT_FORMATS", "PREVIEW_MODES")}
+        self._limits = dict(wf.LIMITS)
+        self._features = dict(wf.FEATURES)
+
+    def tearDown(self):
+        for name, vals in self._snap.items():
+            getattr(wf, name)[:] = vals
+        wf.LIMITS.clear()
+        wf.LIMITS.update(self._limits)
+        wf.FEATURES.clear()
+        wf.FEATURES.update(self._features)
+
+    def test_upscaler_spelling_matches_engine(self):
+        wf.adopt_capabilities(self.CAPS)
+        self.assertIn("Latent (nearest)", wf.UPSCALERS)
+        self.assertNotIn("Latent(nearest)", wf.UPSCALERS)
+        wf.normalize({"hires_upscaler": "Latent (nearest)"})   # no ParamError
+
+    def test_enumerations_adopted(self):
+        wf.adopt_capabilities(self.CAPS)
+        self.assertEqual(wf.OUTPUT_FORMATS, ["png", "jpeg", "webp"])
+        self.assertIn("default", wf.SCHEDULERS)     # baseline word kept for the engine
+        self.assertEqual(wf.SAMPLERS, ["default", "euler", "dpm++2m", "lcm"])
+
+    def test_limits_adopted(self):
+        wf.adopt_capabilities(self.CAPS)
+        self.assertEqual(wf.engine_limits()["max_batch_count"], 8)
+        self.assertEqual(wf.LIMITS["max_upscale_width"], 8192)
+
+    def test_features_merged(self):
+        wf.adopt_capabilities(self.CAPS)
+        self.assertTrue(wf.feature_enabled("hires"))
+        self.assertTrue(wf.feature_enabled("img2img"))
+        self.assertFalse(wf.feature_enabled("lora"))
+        self.assertIsNone(wf.feature_enabled("nonexistent"))
+
+    def test_unsupported_keys_reported(self):
+        wf.adopt_capabilities(self.CAPS)
+        self.assertEqual(wf.unsupported_keys(["hires_scale"]), [])      # hires is on
+        self.assertEqual(wf.unsupported_keys(["lora"]), ["lora"])        # lora is off
+        self.assertEqual(wf.unsupported_keys(["nonexistent_key"]), [])   # not engine-backed
+
+    def test_fuzzy_enum_matching(self):
+        wf.adopt_capabilities(self.CAPS)
+        got = wf.normalize({"hires_upscaler": "latent(nearest)", "output_format": "JPEG"})
+        self.assertEqual(got["hires_upscaler"], "Latent (nearest)")
+        self.assertEqual(got["output_format"], "jpeg")
+
+    def test_defaults_by_mode_used_when_defaults_absent(self):
+        caps = dict(self.CAPS)
+        caps.pop("defaults", None)
+        self.assertEqual(wf.defaults_from_capabilities(caps)["steps"], 4)
+
+    def test_v32_new_keys_normalise(self):
+        got = wf.normalize({"hires_scale": 2.0, "vae_rel_size_w": 0.5,
+                            "output_compression": 90, "output_format": "webp"})
+        self.assertEqual(got["hires_scale"], 2.0)
+        self.assertEqual(got["vae_rel_size_w"], 0.5)
+        self.assertEqual(got["output_compression"], 90)
+
+    def test_v32_ranges_enforced(self):
+        for bad in ({"hires_scale": 0.5}, {"vae_rel_size_w": 1.5},
+                    {"output_compression": 200}, {"output_format": "gif"}):
+            with self.assertRaises(wf.ParamError):
+                wf.normalize(bad)
+
+    def test_v32_payload_paths(self):
+        payload = {}
+        wf.apply(payload, wf.normalize({"hires_scale": 2.0, "output_format": "jpeg",
+                                        "output_compression": 88, "vae_rel_size_w": 0.5}))
+        self.assertEqual(payload["hires"]["scale"], 2.0)
+        self.assertEqual(payload["output_format"], "jpeg")
+        self.assertEqual(payload["output_compression"], 88)
+        self.assertEqual(payload["vae_tiling_params"]["rel_size_w"], 0.5)
+
+
 if __name__ == "__main__":
     unittest.main()

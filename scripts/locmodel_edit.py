@@ -52,7 +52,7 @@ except Exception as exc:  # pragma: no cover - surfaced to the caller
     core = None
     _CORE_IMPORT_ERROR = f"{type(exc).__name__}: {exc}"
 
-VERSION = "3.1.0"
+VERSION = "3.2.0"
 PNG_SIG = b"\x89PNG\r\n\x1a\n"
 
 # ---------------------------------------------------------------------------

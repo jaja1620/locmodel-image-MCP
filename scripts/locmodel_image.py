@@ -62,7 +62,7 @@ from pathlib import Path
 
 import locmodel_workflow as workflow
 
-VERSION = "3.1.0"
+VERSION = "3.2.0"
 APP_NAME = "locmodel-image"
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -97,17 +97,32 @@ DEFAULTS: dict = {
     "size": {
         # Guard by TOTAL AREA, not by a single edge: some engines fail on
         # 512x512 (262k px) while 1280x720 (922k px) succeeds.
+        #
+        # v3.2 changed the contract. These numbers only shape a size the tool
+        # picks itself (aspect presets, or nothing specified). When the caller
+        # passes width/height explicitly, the tool no longer rewrites them: it
+        # only enforces what the engine actually rejects (limits.max_*), and
+        # downgrades everything else (small area, big canvas vs free VRAM) to a
+        # warning. v3.1 silently turned a requested 512x512 into 768x768 and
+        # clamped 2048 to 1536, which is not the tool's call to make.
         "min_area": 768 * 768,
         "multiple": 8,
+        #: preferred long edge when the tool picks the size itself
         "max_side": 1536,
         "max_side_auto": True,
-        "hard_max_side": 2048,
+        #: ceiling for the automatic policy, never above the engine's own limit
+        "hard_max_side": 4096,
+        #: honour an explicit width/height (only engine limits are enforced)
+        "explicit_respect": True,
+        #: warn when an explicit canvas needs more VRAM than this per megapixel
+        #: (rough working-set estimate for a 4B flow model at 1024px)
+        "vram_mb_per_mp": 1600,
     },
     "generate": {
         "timeout": 900,
         "retry": 2,
         "poll_interval": 2.0,
-        "max_count": 4,
+        "max_count": 8,
         "max_download_mb": 64,
         "lock": True,
         "lock_wait": 900,
@@ -567,8 +582,14 @@ def current_model(base: str, cfg: dict) -> str | None:
 
 
 def engine_defaults(base: str, cfg: dict) -> dict:
-    """Read generation defaults from the engine instead of hard-coding them."""
+    """Read generation defaults from the engine instead of hard-coding them.
+
+    Also adopts the live enumerations / limits into the workflow contract, so
+    every later validation call compares against what this engine actually
+    accepts rather than against a list frozen at release time.
+    """
     caps = capabilities(base, cfg)
+    adopted = workflow.adopt_capabilities(caps)
     d = (caps.get("defaults") or {}) if isinstance(caps, dict) else {}
     sp = d.get("sample_params") or {}
     # capabilities spells the guidance block "guided"; read it through the
@@ -583,6 +604,17 @@ def engine_defaults(base: str, cfg: dict) -> dict:
         "batch_count": d.get("batch_count") or live.get("count"),
         "workflow": live,
         "_sample_params_raw": sp,
+        # v3.3.0 extras, used by the size policy and by the availability reports
+        "current_mode": caps.get("current_mode") if isinstance(caps, dict) else None,
+        "supported_modes": caps.get("supported_modes") if isinstance(caps, dict) else None,
+        "limits": workflow.engine_limits(),
+        "output_formats": list(workflow.OUTPUT_FORMATS),
+        "preview_modes": list(workflow.PREVIEW_MODES),
+        "upscalers": list(workflow.UPSCALERS),
+        "features": dict(workflow.FEATURES),
+        "model": caps.get("model") if isinstance(caps, dict) else None,
+        "loras": caps.get("loras") if isinstance(caps, dict) else None,
+        "adopted": adopted,
     }
 
 
@@ -630,6 +662,10 @@ def get_status(cfg: dict | None = None) -> dict:
         "defaults": d,
         "gpu": gpu_memory(),
         "size_policy": _size_policy(cfg, None),
+        "limits": d.get("limits"),
+        "features": d.get("features"),
+        "current_mode": d.get("current_mode"),
+        "supported_modes": d.get("supported_modes"),
         "config_path": str(active_config_path()),
     }
 
@@ -638,10 +674,24 @@ def get_status(cfg: dict | None = None) -> dict:
 # Size policy
 # --------------------------------------------------------------------------
 
-def _size_policy(cfg: dict, gpu: dict | None) -> dict:
+def _size_policy(cfg: dict, gpu: dict | None, limits: dict | None = None) -> dict:
+    """Two-tier size policy.
+
+    * automatic (the tool picks the size): min_area / max_side / VRAM tiering
+    * explicit  (the caller passed width/height): only the engine's own
+      ``limits`` are enforced, everything else becomes a warning
+
+    Before v3.2 the second tier did not exist and the automatic numbers were
+    applied to explicit requests too, silently rewriting user input.
+    """
+    lim = limits if isinstance(limits, dict) and limits else workflow.engine_limits()
+    eng_max_w = int(lim.get("max_width") or 4096)
+    eng_max_h = int(lim.get("max_height") or 4096)
+    eng_min_edge = max(int(lim.get("min_width") or 64), int(lim.get("min_height") or 64))
+
     smin = int(cfg_get(cfg, "size.min_area", 768 * 768))
     mult = int(cfg_get(cfg, "size.multiple", 8))
-    hard_max = int(cfg_get(cfg, "size.hard_max_side", 2048))
+    hard_max = min(int(cfg_get(cfg, "size.hard_max_side", 4096)), max(eng_max_w, eng_max_h))
     max_side = int(cfg_get(cfg, "size.max_side", 1536))
     auto = bool(cfg_get(cfg, "size.max_side_auto", True))
     if auto and gpu and gpu.get("total_mb"):
@@ -653,8 +703,17 @@ def _size_policy(cfg: dict, gpu: dict | None) -> dict:
         else:
             max_side = min(max_side, 1536)
     max_side = max(mult, min(max_side, hard_max))
-    return {"min_area": smin, "min_side_hint": int(round(smin ** 0.5 / mult) * mult),
-            "max_side": max_side, "multiple": mult, "auto_from_vram": auto}
+    return {
+        "min_area": smin,
+        "min_side_hint": int(round(smin ** 0.5 / mult) * mult),
+        "max_side": max_side,
+        "multiple": mult,
+        "auto_from_vram": auto,
+        "explicit_respect": bool(cfg_get(cfg, "size.explicit_respect", True)),
+        "vram_mb_per_mp": int(cfg_get(cfg, "size.vram_mb_per_mp", 1600)),
+        "engine": {"max_width": eng_max_w, "max_height": eng_max_h,
+                   "min_edge": eng_min_edge},
+    }
 
 
 def _align(v: float, mult: int) -> int:
@@ -662,14 +721,23 @@ def _align(v: float, mult: int) -> int:
 
 
 def normalize_size(width, height, cfg: dict, gpu: dict | None = None,
-                   guard: bool = True, downscale: float = 1.0) -> tuple[int, int, list[str]]:
-    """Align to multiple, enforce minimum pixel area and maximum edge.
+                   guard: bool = True, downscale: float = 1.0,
+                   explicit: bool = False, limits: dict | None = None) -> tuple[int, int, list[str]]:
+    """Align to the multiple, then apply the matching size tier.
 
-    Guarding by *area* preserves the user's aspect ratio intent instead of
-    forcing a square minimum edge.
+    ``explicit=True`` (the caller named a width/height) means the request is
+    honoured: only the engine's own ``limits`` can shrink it, because the engine
+    rejects anything outside them with HTTP 400. Everything else -- a small
+    total area, an edge above the VRAM-friendly recommendation -- comes back as
+    a note, not as a silent rewrite.
+
+    ``explicit=False`` keeps the old automatic behaviour: area floor and a
+    VRAM-tiered long edge, used when the tool decided the size itself.
     """
-    pol = _size_policy(cfg, gpu)
+    pol = _size_policy(cfg, gpu, limits)
     mult, min_area, max_side = pol["multiple"], pol["min_area"], pol["max_side"]
+    eng = pol["engine"]
+    respect = pol.get("explicit_respect", True)
     notes: list[str] = []
     try:
         w, h = int(width), int(height)
@@ -681,16 +749,52 @@ def normalize_size(width, height, cfg: dict, gpu: dict | None = None,
     if downscale and downscale != 1.0:
         w, h = w * downscale, h * downscale
 
-    if guard:
+    if guard and explicit and respect:
+        # --- tier 1: the engine's hard limits, the only thing we may change ---
+        if w < eng["min_edge"] or h < eng["min_edge"]:
+            w = max(w, eng["min_edge"])
+            h = max(h, eng["min_edge"])
+            notes.append(f"size raised to the engine minimum edge {eng['min_edge']}px "
+                         f"({int(w)}x{int(h)}); the engine rejects anything smaller")
+        if w > eng["max_width"] or h > eng["max_height"]:
+            scale = min(eng["max_width"] / float(w), eng["max_height"] / float(h))
+            nw, nh = _align(w * scale, mult), _align(h * scale, mult)
+            nw = min(nw, eng["max_width"])
+            nh = min(nh, eng["max_height"])
+            notes.append(f"size {int(w)}x{int(h)} is beyond the engine limits "
+                         f"{eng['max_width']}x{eng['max_height']}; reduced to {nw}x{nh} "
+                         "(the engine returns HTTP 400 above this)")
+            w, h = nw, nh
+        # --- tier 2: advisory only -------------------------------------------
+        if w * h < min_area:
+            notes.append(f"size {int(w)}x{int(h)} is below the {min_area} px area this engine is "
+                         "stable at; honoured as requested, but small canvases sometimes fail "
+                         "with 'no results' -- raise it if the job errors out")
+        if max(w, h) > max_side:
+            need_mp = (w * h) / 1_000_000.0
+            need_mb = int(need_mp * pol.get("vram_mb_per_mp", 1600))
+            msg = (f"size {int(w)}x{int(h)} exceeds the recommended long edge {max_side}px; "
+                   f"honoured as requested (engine limit is {eng['max_width']}px)")
+            if gpu and gpu.get("total_mb"):
+                budget = int(gpu["total_mb"] * 0.75)
+                if need_mb > budget:
+                    msg += (f". Estimated working set ~{need_mb} MB vs ~{budget} MB usable on "
+                            f"{gpu.get('name') or 'this GPU'} ({gpu['total_mb']} MB total): "
+                            "expect OOM -- enable vae_tiling, lower count, or shrink the canvas")
+                else:
+                    msg += f". Estimated working set ~{need_mb} MB, fits in {gpu['total_mb']} MB"
+            notes.append(msg)
+    elif guard:
         if w * h < min_area:
             scale = (min_area / float(w * h)) ** 0.5
             nw, nh = _align(w * scale, mult), _align(h * scale, mult)
             notes.append(f"size {int(w)}x{int(h)} is below the engine's stable area; upscaled to {nw}x{nh}")
             w, h = nw, nh
-        if max(w, h) > max_side:
-            scale = max_side / float(max(w, h))
+        ceiling = min(max_side, max(eng["max_width"], eng["max_height"]))
+        if max(w, h) > ceiling:
+            scale = ceiling / float(max(w, h))
             nw, nh = _align(w * scale, mult), _align(h * scale, mult)
-            notes.append(f"size {int(w)}x{int(h)} exceeds the safe long edge {max_side}px; reduced to {nw}x{nh}")
+            notes.append(f"size {int(w)}x{int(h)} exceeds the safe long edge {ceiling}px; reduced to {nw}x{nh}")
             w, h = nw, nh
 
     aw, ah = _align(w, mult), _align(h, mult)
@@ -842,9 +946,15 @@ def generate(prompt: str = "", cfg: dict | None = None, *, negative_prompt: str 
     # Validate cheap arguments BEFORE touching the engine so that misuse never
     # costs a network round-trip.
     count = 1 if count is None else count
-    max_count = int(cfg_get(cfg, "generate.max_count", 4))
+    cfg_max_count = int(cfg_get(cfg, "generate.max_count", 8))
+    eng_batch_max = int(workflow.LIMITS.get("max_batch_count") or 0)
+    max_count = min(cfg_max_count, eng_batch_max) if eng_batch_max else cfg_max_count
     if int(count) > max_count:
-        raise BridgeError(f"count={count} exceeds generate.max_count={max_count}", "bad_arguments")
+        raise BridgeError(
+            f"count={count} exceeds the maximum batch count {max_count} "
+            f"(config generate.max_count={cfg_max_count}, engine limits.max_batch_count="
+            f"{eng_batch_max or 'unknown'})",
+            "bad_arguments")
     for name, val in (("width", width), ("height", height)):
         if val is not None and int(val) <= 0:
             raise BridgeError(f"{name} must be a positive integer, got {val}", "bad_arguments")
@@ -872,15 +982,33 @@ def generate(prompt: str = "", cfg: dict | None = None, *, negative_prompt: str 
     except workflow.ParamError as exc:
         raise BridgeError(str(exc), "bad_arguments", getattr(exc, "hint", "")) from None
 
+    # An explicit size means the caller already decided; only the engine's own
+    # limits may override it (see normalize_size). "explicit" excludes sizes we
+    # derived from an aspect preset, which the tool owns.
+    explicit_size = bool(width or height) and not aspect
+    eng_limits = eng.get("limits") if isinstance(eng.get("limits"), dict) else None
+
+    # The engine may report a tighter batch ceiling than the one we assumed
+    # before probing it; re-check now that limits are real.
+    eng_batch_max = int((eng_limits or {}).get("max_batch_count") or workflow.LIMITS.get("max_batch_count") or 0)
+    if eng_batch_max:
+        max_count = min(cfg_max_count, eng_batch_max)
+        if int(count) > max_count:
+            raise BridgeError(
+                f"count={count} exceeds the maximum batch count {max_count} "
+                f"(config generate.max_count={cfg_max_count}, engine limits.max_batch_count="
+                f"{eng_batch_max})",
+                "bad_arguments")
+
     if aspect and not (width and height):
         w0, h0 = aspect_to_size(aspect, (width or height or 1024) ** 2 or 1024 * 1024)
         width, height = w0, h0
     width = int(width or eng.get("width") or 1024)
     height = int(height or eng.get("height") or 1024)
-    steps = int(steps if steps is not None else (eng.get("steps") or 20))
-    sampler = sampler or eng.get("sampler") or "euler"
+    steps = int(steps if steps is not None else (eng.get("steps") or workflow.FALLBACK["steps"]))
+    sampler = sampler or eng.get("sampler") or workflow.FALLBACK["sampler"]
     if cfg_scale is None:
-        cfg_scale = eng.get("cfg")
+        cfg_scale = eng.get("cfg") if eng.get("cfg") is not None else workflow.FALLBACK["cfg"]
 
     if seed is None or int(seed) < 0:
         seed = random.randint(1, 2 ** 31 - 1)
@@ -889,7 +1017,13 @@ def generate(prompt: str = "", cfg: dict | None = None, *, negative_prompt: str 
     retry = int(retry if retry is not None else cfg_get(cfg, "generate.retry", 2))
     poll = float(cfg_get(cfg, "generate.poll_interval", 2.0))
 
-    w, h, notes = normalize_size(width, height, cfg, gpu, guard=guard)
+    w, h, notes = normalize_size(width, height, cfg, gpu, guard=guard,
+                                 explicit=explicit_size, limits=eng_limits)
+    if wf:
+        inert = workflow.unsupported_keys(list(wf))
+        if inert:
+            notes.append("the loaded model does not expose " + ", ".join(inert) +
+                         "; the values were sent but will have no effect")
     if gpu and gpu.get("free_mb") is not None and gpu["free_mb"] < int(cfg_get(cfg, "gpu.min_free_mb_warn", 500)):
         notes.append(
             f"free VRAM is low ({gpu['free_mb']} MB). A resident model normally keeps it low, "
@@ -928,7 +1062,8 @@ def generate(prompt: str = "", cfg: dict | None = None, *, negative_prompt: str 
     if dry_run:
         return {"ok": True, "dry_run": True, "payload": payload, "size_notes": notes,
                 "engine": {"base": base, "port": port, "detected_by": src},
-                "out_dir": str(out_path), "engine_defaults": eng, "size_policy": _size_policy(cfg, gpu)}
+                "out_dir": str(out_path), "engine_defaults": eng,
+                "size_policy": _size_policy(cfg, gpu, limits=eng_limits)}
 
     out_path.mkdir(parents=True, exist_ok=True)
     job_path = cfg_get(cfg, "engine.img_gen_path", "/sdcpp/v1/img_gen")
@@ -1181,7 +1316,7 @@ def main(argv: list[str] | None = None) -> int:
     g.add_argument("--prefix", default="locmodel")
     g.add_argument("--timeout", type=int)
     g.add_argument("--retry", type=int)
-    g.add_argument("--no-guard", action="store_true", help="disable min-area / max-edge guard")
+    g.add_argument("--no-guard", action="store_true", help="force tier-A sizing: send the requested size as-is, only the engine limits may clamp it")
     g.add_argument("--dry-run", action="store_true", help="print the payload without generating")
 
     e = sub.add_parser("edit", help="repaint only a masked area of an existing image")

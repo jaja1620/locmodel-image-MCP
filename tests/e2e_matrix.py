@@ -94,7 +94,86 @@ def case_dry_run(out_dir: Path):
     record("cli.dry_run", ok, "payload follows engine defaults, no image written",
            {"size": f"{p.get('width')}x{p.get('height')}",
             "steps": p.get("sample_params", {}).get("sample_steps"),
-            "sampler": p.get("sample_params", {}).get("sample_method")}, secs)
+            "sampler": p.get("sample_params", {}).get("sample_method"),
+            "size_policy": obj.get("size_policy")}, secs)
+
+
+def case_size_policy():
+    """v3.2 two-tier sizes: explicit requests are honoured, engine limits clamp.
+
+    Verified through --dry-run so the matrix stays fast and deterministic; the
+    real generation path is covered by cli.explicit_512 below.
+    """
+    checks = []
+
+    obj, code, secs, _ = run_cli(["generate", "--prompt", "small", "--dry-run",
+                                  "--width", "512", "--height", "512"])
+    checks.append(("explicit_512_kept",
+                   code == 0 and (obj.get("payload", {}).get("width"),
+                                  obj.get("payload", {}).get("height")) == (512, 512),
+                   {"size": f"{obj.get('payload', {}).get('width')}"
+                            f"x{obj.get('payload', {}).get('height')}",
+                    "notes": obj.get("size_notes")}))
+
+    obj2, _, _, _ = run_cli(["generate", "--prompt", "wide", "--dry-run",
+                             "--width", "2048", "--height", "1152"])
+    checks.append(("explicit_above_1536_kept",
+                   (obj2.get("payload", {}).get("width"),
+                    obj2.get("payload", {}).get("height")) == (2048, 1152),
+                   {"size": f"{obj2.get('payload', {}).get('width')}"
+                            f"x{obj2.get('payload', {}).get('height')}",
+                    "notes": obj2.get("size_notes")}))
+
+    obj3, _, _, _ = run_cli(["generate", "--prompt", "huge", "--dry-run",
+                             "--width", "5000", "--height", "5000"])
+    checks.append(("engine_limit_clamps",
+                   (obj3.get("payload", {}).get("width"),
+                    obj3.get("payload", {}).get("height")) == (4096, 4096),
+                   {"size": f"{obj3.get('payload', {}).get('width')}"
+                            f"x{obj3.get('payload', {}).get('height')}",
+                    "notes": obj3.get("size_notes")}))
+
+    obj4, _, _, _ = run_cli(["generate", "--prompt", "auto", "--dry-run", "--aspect", "16:9"])
+    pol = obj4.get("size_policy") or {}
+    checks.append(("auto_follows_policy",
+                   bool(pol.get("max_side")) and bool(pol.get("engine")),
+                   {"size": f"{obj4.get('payload', {}).get('width')}"
+                            f"x{obj4.get('payload', {}).get('height')}",
+                    "policy": pol}))
+
+    ok = all(c[1] for c in checks)
+    record("cli.size_policy", ok,
+           "explicit sizes honoured; only engine limits clamp; auto follows the VRAM policy",
+           {c[0]: c[2] for c in checks}, secs)
+
+
+def case_new_params():
+    """v3.2 exposed knobs reach the payload with engine-compatible spellings."""
+    obj, code, secs, _ = run_cli(["generate", "--prompt", "params", "--dry-run",
+                                  "--param", "hires_upscaler=latent(nearest)",
+                                  "--param", "hires_scale=2.0",
+                                  "--param", "output_format=jpeg",
+                                  "--param", "output_compression=88",
+                                  "--param", "vae_rel_size_w=0.5"])
+    p = obj.get("payload", {})
+    hires = p.get("hires") or {}
+    vae = p.get("vae_tiling_params") or {}
+    got = {
+        "hires.upscaler": hires.get("upscaler"),
+        "hires.scale": hires.get("scale"),
+        "output_format": p.get("output_format"),
+        "output_compression": p.get("output_compression"),
+        "rel_size_w": vae.get("rel_size_w"),
+    }
+    ok = (code == 0
+          and got["hires.upscaler"] == "Latent (nearest)"
+          and float(got["hires.scale"] or 0) == 2.0
+          and got["output_format"] == "jpeg"
+          and int(got["output_compression"] or 0) == 88
+          and float(got["rel_size_w"] or 0) == 0.5)
+    record("cli.new_params", ok,
+           "fuzzy upscaler spelling corrected; output/vae knobs reach the payload",
+           got, secs)
 
 
 def gen_case(name: str, expect: str, args: list[str], out_dir: Path, expect_ok=True):
@@ -118,21 +197,24 @@ def gen_case(name: str, expect: str, args: list[str], out_dir: Path, expect_ok=T
     return obj
 
 
-def case_no_guard(out_dir: Path):
-    """The guard exists because small pixel areas fail; verify it is bypassable.
+def case_explicit_generation(out_dir: Path):
+    """A 512x512 request must stay 512x512 all the way to the engine.
 
-    Both outcomes are legitimate on different hardware -- what must hold is
-    that the guard step is *reported* and nothing crashes.
+    Before v3.2 the tool silently rescaled this to 768x768. Small canvases may
+    legitimately fail on some hardware -- what must hold is that the reported
+    size matches the request.
     """
-    obj, code, secs, _ = run_cli(["generate", "--prompt", "unguarded small size",
-                                  "--width", "512", "--height", "512", "--no-guard",
+    obj, code, secs, _ = run_cli(["generate", "--prompt", "explicit small size",
+                                  "--width", "512", "--height", "512",
                                   "--retry", "1", "--out", str(out_dir)])
-    size_ok = obj.get("params", {}).get("width") == 512
+    params = obj.get("params") or {}
+    size_ok = (params.get("width"), params.get("height")) == (512, 512)
     ok = size_ok and code in (0, 2)
-    record("cli.no_guard_512", ok,
-           "guard bypassed (width stays 512); success or clean generation_failed",
-           {"code": code, "ok": obj.get("ok"), "size": f"{obj.get('params', {}).get('width')}"
-            f"x{obj.get('params', {}).get('height')}", "message": obj.get("message")}, secs)
+    record("cli.explicit_512", ok,
+           "explicit 512x512 honoured end-to-end (success or clean generation_failed)",
+           {"code": code, "ok": obj.get("ok"),
+            "size": f"{params.get('width')}x{params.get('height')}",
+            "notes": obj.get("notes"), "message": obj.get("message")}, secs)
 
 
 def case_bad_args():
@@ -168,15 +250,15 @@ def case_no_engine(tmp_cfg: Path):
 
 
 def case_config(tmp_cfg: Path):
-    obj, code, secs, _ = run_cli(["--config", str(tmp_cfg), "config", "set", "size.max_side", "1280"])
-    obj2, code2, _, _ = run_cli(["--config", str(tmp_cfg), "config", "get", "size.max_side"])
+    obj, code, secs, _ = run_cli(["--config", str(tmp_cfg), "config", "set", "size.min_area", "589824"])
+    obj2, code2, _, _ = run_cli(["--config", str(tmp_cfg), "config", "get", "size.min_area"])
     obj3, code3, _, _ = run_cli(["--config", str(tmp_cfg), "config", "path"])
     reloaded = json.loads(tmp_cfg.read_text(encoding="utf-8"))
-    written = (reloaded.get("size") or {}).get("max_side")
-    ok = (code == 0 and str(written) == "1280"
-          and str(obj2.get("size.max_side")) == "1280" and obj3.get("exists") is True)
+    written = (reloaded.get("size") or {}).get("min_area")
+    ok = (code == 0 and str(written) == "589824"
+          and str(obj2.get("size.min_area")) == "589824" and obj3.get("exists") is True)
     record("cli.config", ok, "set/get/path persist to disk",
-           {"written": written, "read": obj2.get("size.max_side"),
+           {"written": written, "read": obj2.get("size.min_area"),
             "file": obj3.get("path")}, secs)
 
 
@@ -304,23 +386,29 @@ def main() -> int:
         case_status()
         case_models()
         case_dry_run(out_dir)
+        case_size_policy()
+        case_new_params()
 
     if args.stage in ("all", "gen"):
-        P = "every dimension above the guard passes, aspect preserved"
+        P = "explicit sizes are honoured, aspect preserved"
         T = ["--timeout", str(args.gen_timeout)]
         gen_case("gen.square_768", P, ["--prompt", "quiet courtyard, soft daylight, 35mm",
                                        "--width", "768", "--height", "768", *T], out_dir)
         gen_case("gen.aspect_16_9", P, ["--prompt", "wide architectural facade, dusk",
                                         "--aspect", "16:9", *T], out_dir)
-        gen_case("gen.small_640_upscaled", "640x640 upscaled to the minimum area",
+        gen_case("gen.explicit_640", "640x640 stays 640x640 (no min-area rewrite)",
                  ["--prompt", "small test cube", "--width", "640", "--height", "640", *T], out_dir)
         if not args.quick:
-            gen_case("gen.portrait_9_16", "portrait aspect stays portrait after the guard",
+            gen_case("gen.portrait_9_16", "portrait aspect stays portrait",
                      ["--prompt", "tall atrium, looking up", "--aspect", "9:16", *T], out_dir)
             gen_case("gen.batch_2", "count=2 returns two distinct files",
                      ["--prompt", "batch of two cubes", "--width", "768", "--height", "768",
                       "--count", "2", *T], out_dir)
-            case_no_guard(out_dir)
+            gen_case("gen.jpeg_output", "output_format=jpeg produces .jpg files",
+                     ["--prompt", "concrete texture close-up", "--width", "768", "--height", "768",
+                      "--param", "output_format=jpeg", "--param", "output_compression=88", *T],
+                     out_dir)
+            case_explicit_generation(out_dir)
 
     if args.stage in ("all", "diag"):
         case_bad_args()
@@ -334,7 +422,7 @@ def main() -> int:
 
     passed = sum(1 for r in RESULTS if r["ok"])
     total = len(RESULTS)
-    report = {"version": "3.1.0", "python": PY, "out_dir": str(out_dir),
+    report = {"version": "3.2.0", "python": PY, "out_dir": str(out_dir),
               "passed": passed, "total": total,
               "failed": [r["case"] for r in RESULTS if not r["ok"]],
               "cases": RESULTS}

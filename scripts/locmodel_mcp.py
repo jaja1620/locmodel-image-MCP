@@ -52,7 +52,7 @@ else:
     _EDIT_IMPORT_ERROR = None
 
 SERVER_NAME = "locmodel-image"
-SERVER_VERSION = core.VERSION if core else "3.1.0"
+SERVER_VERSION = core.VERSION if core else "3.2.0"
 SUPPORTED_PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
 DEFAULT_PROTOCOL_VERSION = "2024-11-05"
 
@@ -65,11 +65,16 @@ def log(msg: str) -> None:
 def _policy_text() -> str:
     """Render size policy from the single source of truth (core.DEFAULTS)."""
     if not core:
-        return "size guard: 768px minimum area, 1536px maximum edge"
+        return ("auto-sized by the tool: 768k-pixel minimum area, long edge <= 1536px; "
+                "an explicit width/height is honoured (engine limit 4096px)")
     cfg = core.load_config()
     pol = core._size_policy(cfg, None)
-    return (f"default {core.DEFAULTS['size']['min_area'] // 1024}k-pixel minimum area, "
-            f"long edge <= {pol['max_side']}px, multiple of {pol['multiple']}")
+    eng = pol["engine"]
+    return (f"when the tool picks the size: {pol['min_area'] // 1024}k-pixel minimum area, "
+            f"long edge <= {pol['max_side']}px, multiple of {pol['multiple']}. "
+            f"An explicit width/height is honoured as requested -- only the engine's hard "
+            f"limits ({eng['min_edge']}-{eng['max_width']}px per edge) can shrink it, and "
+            f"big canvases come back with a VRAM warning instead of being resized")
 
 
 def _generate_schema() -> dict:
@@ -85,12 +90,18 @@ def _generate_schema() -> dict:
                 "type": "string",
                 "description": "What to avoid. A quality-oriented default is applied when omitted.",
             },
-            "width": {"type": "integer", "description": "Pixel width. Defaults to the engine's own default."},
-            "height": {"type": "integer", "description": "Pixel height. Defaults to the engine's own default."},
+            "width": {"type": "integer",
+                      "description": "Pixel width. Used exactly as given (multiples of 8 are "
+                                     "cleanest); only the engine's own limit (64-4096 per edge) "
+                                     "can change it. Omitted = the engine default."},
+            "height": {"type": "integer",
+                       "description": "Pixel height. Same contract as width. Omitted = the "
+                                      "engine default."},
             "aspect": {
                 "type": "string",
                 "enum": list(core.ASPECTS) if core else ["1:1", "16:9", "9:16", "4:3", "3:4"],
-                "description": "Aspect preset used when width/height are omitted.",
+                "description": "Aspect preset used when width/height are omitted; the tool then "
+                               "sizes the image itself and applies its VRAM-aware long edge.",
             },
             "steps": {"type": "integer", "description": "Sampling steps. Defaults to the engine's own default."},
             "sampler": {"type": "string", "description": "Sampler name, e.g. euler / dpm++2m."},
@@ -98,7 +109,7 @@ def _generate_schema() -> dict:
             "count": {"type": "integer", "description": "Number of images (1-4 recommended)."},
             "output_dir": {
                 "type": "string",
-                "description": "Absolute directory for the PNG files. Omit to use the working "
+                "description": "Absolute directory for the image files. Omit to use the working "
                                "directory's ./output folder.",
             },
             "filename_prefix": {"type": "string", "description": "Semantic filename prefix, e.g. architecture_court."},
@@ -113,14 +124,27 @@ def _generate_schema() -> dict:
                     "distilled_guidance, slg_scale, clip_skip, strength, seed, count. "
                     "Folded groups: slg_layers/slg_layer_start/slg_layer_end, "
                     "hires_enabled/hires_upscaler/hires_target_width/hires_target_height/"
-                    "hires_steps/hires_denoising_strength/hires_upscale_tile_size, "
-                    "vae_tiling/vae_tile_size_w/vae_tile_size_h/vae_target_overlap/"
-                    "vae_temporal_tiling, high_noise_steps/high_noise_cfg/high_noise_sampler, "
+                    "hires_steps/hires_denoising_strength/hires_upscale_tile_size/"
+                    "hires_scale/hires_custom_sigmas (upscaler names are engine spellings, "
+                    "e.g. 'Latent (nearest)'), "
+                    "vae_tiling/vae_tile_size_w/vae_tile_size_h/vae_rel_size_w/vae_rel_size_h/"
+                    "vae_target_overlap/vae_temporal_tiling/vae_extra_tiling_args, "
+                    "output_format (png/jpeg/webp)/output_compression, "
+                    "high_noise_steps/high_noise_cfg/high_noise_sampler, "
                     "custom_sigmas/extra_sample_args/lora. Values travel in the HTTP payload "
                     "only -- nothing is written to LocModel's config."
                 ),
             },
             "timeout_s": {"type": "integer", "description": "Job timeout in seconds."},
+            "guard": {"type": "boolean",
+                      "description": "Keep the automatic size guard (area floor, VRAM-aware long "
+                                     "edge) for a size the tool picks itself. Set false to submit "
+                                     "exactly the size given. Explicit width/height is honoured "
+                                     "either way; only the engine's hard limits still apply."},
+            "dry_run": {"type": "boolean",
+                        "description": "Validate and build the payload, return it with the size "
+                                       "notes and the live engine limits, submit nothing. Use it "
+                                       "to confirm how a parameter or size will land."},
         },
         "required": ["prompt"],
     }
@@ -132,9 +156,9 @@ TOOLS = [
         "description": (
             "Generate images with the LOCAL LocModel / stable-diffusion.cpp engine "
             "(offline, no cloud cost). Pass an already-optimised English prompt; the tool "
-            "returns absolute PNG paths plus the seed used for reproduction. "
-            f"Sizing is guarded automatically ({_policy_text()}); one 1024x1024 image takes "
-            "roughly 20-60 s on a mid-range GPU."
+            "returns absolute image paths plus the seed used for reproduction. "
+            f"Sizing: {_policy_text()}. One 1024x1024 image takes roughly 20-60 s on a "
+            "mid-range GPU."
         ),
         "inputSchema": _generate_schema(),
     },
@@ -342,7 +366,7 @@ def _get_params_schema() -> dict:
     return {
         "type": "object",
         "properties": {
-            "include_folded": {"type": "boolean", "description": "Also list the folded groups (hires, vae_tiling, high_noise, raw, slg)."},
+            "include_folded": {"type": "boolean", "description": "Also list the folded groups (hires, vae_tiling, output, high_noise, raw, slg)."},
             "live_defaults": {"type": "boolean", "description": "Read defaults from the running engine instead of the built-in fallback table."},
         },
     }
@@ -507,12 +531,26 @@ def call_tool(name: str, args: dict) -> dict:
                 filename_prefix=args.get("filename_prefix") or "locmodel",
                 timeout=args.get("timeout_s"),
                 model=args.get("model"),
+                guard=bool(args.get("guard", True)),
+                dry_run=bool(args.get("dry_run", False)),
             )
         except core.BridgeError as exc:
             return _error(str(exc), exc.hint)
         except Exception as exc:  # pragma: no cover
             log(traceback.format_exc())
             return _error(f"{type(exc).__name__}: {exc}")
+
+        if res.get("dry_run"):
+            pol = res.get("size_policy") or {}
+            lines = ["dry run: nothing was submitted",
+                     f"payload: {json.dumps(res.get('payload') or {}, ensure_ascii=False)}",
+                     f"output dir: {res.get('out_dir')}",
+                     f"size policy: {json.dumps(pol, ensure_ascii=False)}"]
+            if res.get("size_notes"):
+                lines.append("notes: " + " | ".join(res["size_notes"]))
+            out = dict(res)
+            out["summary"] = "\n".join(lines)
+            return _text(out)
 
         if not res.get("ok"):
             attempts = res.get("attempts") or []

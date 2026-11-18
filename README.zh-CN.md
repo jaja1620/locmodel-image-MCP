@@ -25,6 +25,7 @@
 - [快速开始](#快速开始)
 - [改图：局部重绘与整图重画](#改图局部重绘与整图重画)
 - [接入 MCP 服务](#接入-mcp-服务)
+- [工作流参数](#工作流参数)
 - [安装配套 Skill](#安装配套-skill)
 - [CLI 参考](#cli-参考)
 - [配置参考](#配置参考)
@@ -33,6 +34,7 @@
 - [测试](#测试)
 - [故障排查](#故障排查)
 - [兼容性与限制](#兼容性与限制)
+- [3.2 变更](#32-变更)
 - [3.0 变更](#30-变更)
 - [2.0 变更](#20-变更)
 - [许可证](#许可证)
@@ -249,8 +251,9 @@ stdio 传输，指向 `scripts/locmodel_mcp.py` 即可。若自发现在本机�
 
 | 工具 | 参数 | 返回 |
 | --- | --- | --- |
-| `generate_image` | `prompt`（必填）、`negative_prompt`、`width`、`height`、`aspect`、`steps`、`sampler`、`seed`、`count`、`output_dir`、`filename_prefix`、`model`、`timeout_s` | 图片路径、实际 seed、最终尺寸、耗时 |
-| `locmodel_status` | — | 引擎状态、端口及发现方式、模型、引擎默认参数、显存 |
+| `generate_image` | `prompt`（必填）、`negative_prompt`、`width`、`height`、`aspect`、`steps`、`sampler`、`seed`、`count`、`output_dir`、`filename_prefix`、`model`、`timeout_s`、`params`、`guard`、`dry_run` | 图片路径、实际 seed、最终尺寸、耗时、`notes` |
+| `locmodel_status` | — | 引擎状态、端口及发现方式、模型、引擎默认参数、显存、`limits`、`features`、`current_mode`、`supported_modes`、引擎实际枚举 |
+| `set_workflow_params` / `get_workflow_params` / `reset_workflow_params` | `params`（set 必填）、`keys`（reset 可选）、`include_folded`（get 可选） | 会话参数集、逐项默认值与来源、失效原因 |
 | `edit_image` | init_image（必填）、prompt（必填）、mask_image 或 regions、strength、negative_prompt、model、steps、sampler、cfg_scale、seed、mask_blur、inpaint_padding、channel、out_dir、filename_prefix、verify、dry_run | 改图路径、掩码统计、`selection`（实际用哪个模型）、`verify` 校验块 |
 | `redraw_image` | init_image（必填）、prompt（必填）、strength，其余同上（无掩码参数） | 重画路径、`selection`、`verify` |
 | `list_edit_models` | — | 模型、族/优先级、能否局部重绘、自动选择结果 |
@@ -260,6 +263,67 @@ stdio 传输，指向 `scripts/locmodel_mcp.py` 即可。若自发现在本机�
 | `engine_discover` | — | 强制重扫端口并返回结果 |
 
 `generate_image` 失败时返回 `isError: true` 并附可执行 `hint`，Agent 能据此调整而不是盲目重试。
+
+---
+
+## 工作流参数
+
+引擎 `sample_params`、`hires`、`vae_tiling_params`、`high_noise_sample_params`、`lora` 里的键，3.2 起都能从本工具设置。
+参数**只走 HTTP payload**，绝不写 `config.json`——该文件归 LocModel 管，它会按自己面板状态回写，写进去的值会被静默还原。
+
+三种作用域，生命周期刻意不同：
+
+| 作用域 | MCP | CLI | 生命周期 |
+| --- | --- | --- | --- |
+| 单次调用 | `generate_image(..., params={"cfg": 3.5})` | `generate --param cfg=3.5` | 仅该任务 |
+| 本会话 | `set_workflow_params(params={"cfg": 3.5, "scheduler": "karras"})` | `params set --param cfg=3.5` | MCP 进程内存，重启即失效 |
+| 回到默认 | `reset_workflow_params()` / `reset_workflow_params(keys=["cfg"])` | `params reset` | 立刻重新跟随面板 |
+
+优先级：**单次 `params` > 会话参数 > 引擎面板 / 引擎默认**。没人指定就不发送，出图完全跟随面板——这张表是开关，不是要填的表单。
+
+随时查看实时默认值：
+
+```bash
+python scripts/locmodel_image.py params list          # 14 个核心参数及实时默认值
+python scripts/locmodel_image.py params list --all    # 含折叠组
+python scripts/locmodel_image.py params show --param cfg
+```
+
+`source: engine` 表示来自 `/sdcpp/v1/capabilities`；`source: tool` 表示引擎没广告、用了内置兜底；`source: session` 表示本进程内被覆盖。
+
+### 核心参数（14 项）
+
+| 参数 | 别名 | 范围 | 说明 |
+| --- | --- | --- | --- |
+| `cfg` | `cfg_scale`、`txt_cfg` | 0–30 | 提示词跟随度 vs 高光过曝 |
+| `img_cfg` | — | 0–30 | 图像条件分支；留空即关闭 |
+| `steps` | `sample_steps` | 1–200 | turbo/flow 模型 8–12 即到顶 |
+| `sampler` | `sample_method` | 22 项 | `euler` 是最稳的默认 |
+| `scheduler` | — | 19 项 | `karras`/`beta` 更锐，`sgm_uniform` 更柔 |
+| `flow_shift` | — | 0–100 | flow-matching 模型，2–5 有可见差异 |
+| `shifted_timestep` | — | -1–1000 | 保持 0 |
+| `eta` | — | 0–1 | SDE 采样器的噪声注入 |
+| `distilled_guidance` | — | 0–30 | 蒸馏/加速权重 |
+| `slg_scale` | — | -10–10 | 跳层引导，0 关闭 |
+| `clip_skip` | — | -64–12 | -1 为引擎默认 |
+| `strength` | — | 0–1 | 仅改图/img2img：0.35 微调，0.75 常规 |
+| `seed` | — | -1 或整数 | -1 随机，做 A/B 时固定 |
+| `count` | — | 1–8 | 同时受 `generate.max_count` 与 `limits.max_batch_count` 约束 |
+
+### 折叠组
+
+平时不露头，需要时 `params list --all` 会带实时默认值打印出来。
+
+- **hires** — `hires_enabled`、`hires_upscaler`（9 个引擎名，如 `Latent (nearest)`）、`hires_scale`（倍数）、`hires_target_width`、`hires_target_height`、`hires_steps`、`hires_denoising_strength`、`hires_upscale_tile_size`、`hires_custom_sigmas`
+- **vae via tiling** — `vae_tiling`、`vae_tile_size_w`、`vae_tile_size_h`、`vae_rel_size_w`、`vae_rel_size_h`、`vae_extra_tiling_args`、`vae_target_overlap`、`vae_temporal_tiling`（不必非有 18 GB 显存：缩小画布之前先把它打开）
+- **output** — `output_format`（`png` / `jpeg` / `webp`）、`output_compression`（0–100）
+- **high noise** — `high_noise_steps`、`high_noise_cfg`、`high_noise_sampler`
+- **slg 细节** — `slg_layers`、`slg_layer_start`、`slg_layer_end`
+- **raw 透传** — `custom_sigmas`、`extra_sample_args`、`lora`（`[{"path": "x.safetensors", "multiplier": 0.8}]`；需引擎带 `--lora-model-dir`）
+
+### 校验在客户端
+
+引擎对胡来的值照样返回 `202 queued` 然后卡住（`scheduler="bogus"`、`steps="abc"`）。所以类型与范围一律先在本工具校验，非法值立刻 `bad_arguments` 并给提示，不浪费 GPU 时间。别名也接受（`cfg_scale`→`cfg`、`sample_steps`→`steps`、`Karras`→`karras`、`"7,8,9"`→`[7, 8, 9]`），枚举匹配忽略空格与符号。
 
 ---
 
@@ -323,7 +387,7 @@ locmodel_image.py [--config PATH] [--verbose] [--log-file PATH] <子命令> [参
 | `--prefix` | `locmodel` | 文件名前缀 |
 | `--timeout` | `generate.timeout` | 单任务超时秒数 |
 | `--retry` | `generate.retry` | 瞬时失败时换 seed 重试次数 |
-| `--no-guard` | 关 | 原样发送请求尺寸 |
+| `--no-guard` | 关 | 强制走 A 档：按请求尺寸原样发送 |
 | `--dry-run` | 关 | 只打印 HTTP payload 就退出，不占用 GPU |
 
 ### `edit` 参数
@@ -393,17 +457,19 @@ locmodel_image.py [--config PATH] [--verbose] [--log-file PATH] <子命令> [参
     "probe_timeout": 1.5
   },
   "size": {
-    "min_area": 589824,                // 768x768，低于此面积引擎容易失败
+    "min_area": 589824,                // 768x768，工具自选尺寸时的面积下限
     "multiple": 8,                     // 边长对齐粒度
     "max_side": 1536,                  // 开启 max_side_auto 时随显存自动下调
     "max_side_auto": true,
-    "hard_max_side": 2048
+    "hard_max_side": 4096,             // 即引擎 limits.max_width/height
+    "explicit_respect": true,          // 用户显式给的宽高优先于上面两档
+    "vram_mb_per_mp": 1600             // 每百万像素的显存告警阈值
   },
   "generate": {
     "timeout": 900,
     "retry": 2,
     "poll_interval": 2.0,
-    "max_count": 4,
+    "max_count": 8,                    // 引擎 limits.max_batch_count
     "max_download_mb": 64,
     "lock": true,
     "lock_wait": 900
@@ -449,15 +515,24 @@ locmodel_image.py config set generate.lock false          # 仅单进程使用
 
 ## 尺寸与显存策略
 
-守卫针对两种会产生误导性报错的失败：
-**像素太少**（`generate_image returned no results`）与**像素太多**（OOM / workspace capacity check，在 Windows 上可能表现为 `ucrtbase.dll 0xc0000409 / BEX64`）。
+分两档，因为两种场景的诉求相反：用户点名要某个画布就该拿到那个画布，而工具自己挑画布时应该待在稳定区间里。
 
-按顺序应用规则：
+**A 档——用户显式给了 `width`/`height`（或 CLI 加 `--no-guard`）。** 按给的数发送，只有两件事能改它：
+
+1. 边长对齐到 `size.multiple`（默认 8）
+2. 引擎自身 `limits`（每边 64…4096，实时读取）触发缩回——**并给出 warning，绝不静默**
+
+其余都只是提醒而非动作：低于 `size.min_area` 或超出显存启发式阈值，只在 `notes` 里给警告，图照出。
+
+**B 档——工具自选尺寸（`aspect` 预设或不给尺寸）。** 走老守卫：
 
 1. `width`/`height`（或长宽比预设）对齐到 `size.multiple`
 2. 总面积低于 `size.min_area` → 等比放大（保留长宽比）
 3. 最长边超过有效上限 → 等比缩小
-4. 有效上限为 `size.max_side`；开启 `max_side_auto` 时按实测显存自动下调，且不超过 `hard_max_side`
+4. 有效上限为 `size.max_side`；开启 `max_side_auto` 时按实测显存自动下调，且不超过 `hard_max_side`（4096，即引擎硬限）
+
+守卫针对两种会产生误导性报错的失败：
+**像素太少**（`generate_image returned no results`）与**像素太多**（OOM / workspace capacity check，在 Windows 上可能表现为 `ucrtbase.dll 0xc0000409 / BEX64`）。
 
 实用配置：
 
@@ -465,7 +540,7 @@ locmodel_image.py config set generate.lock false          # 仅单进程使用
 | --- | --- | --- |
 | 4–6 GB | 768×768、1024×576，`count`=1 | `generate.retry` 至少 1 |
 | 8 GB | 1024×1024、1280×720，`count`≤2 | turbo 模型实测最佳区间 |
-| 12 GB+ | 1536×864、1536×1536 | 需显式调高 `size.max_side` |
+| 12 GB+ | 1536×864、1536×1536 | 可显式调高 `size.max_side`；显式尺寸不受该上限约束 |
 
 还有一条能规避大多数神秘失败的习惯：**只保留一个图像引擎常驻**。LocModel、LM Studio 模型、第二个扩散引擎同时占同一块显卡，是 `workspace capacity check` 崩溃的经典成因。在 LocModel 内切换画图模型时，重启 LocModel 让旧引擎释放显存。
 
@@ -538,10 +613,20 @@ python tests/e2e_matrix.py --stage all       # 全量（8 GB 卡约 10 分钟）
 - **接口面**：面向 stable-diffusion.cpp 服务的 `/sdcpp/v1/*` API，**不兼容** Automatic1111（不使用 `/sdapi/v1/txt2img`）。路径均可配置，路由略有差异的分支可用 `config set engine.*_path` 适配。
 - **自发现是启发式**：同机跑多个引擎时请显式钉死端口，否则可能猜错且无声——这也是 `status` 始终报告"端口是怎么找到的"的原因。
 - **不做模型管理**：加载/卸载、模型切换、显存预算仍归 LocModel 管。本工具绝不替你杀进程或卸载模型。
-- **未实现**：图生图、局部重绘、放大、视频生成。引擎广告了其中部分能力，但本项目未验证——宁可留空，不做半成品。
+- **未实现**：对已有图片单独放大、视频生成。出图过程中的 hires 放大已支持（`hires_enabled` + `hires_scale` / `hires_upscaler`）；引擎未广告视频模式，故 `generate_video` 不做半成品。
 - **图内文字**：模型固有限制，与本桥接层无关。
 
 ---
+
+## 3.2 变更
+
+- **能力从引擎读，不再写死**：`adopt_capabilities()` 用 `/sdcpp/v1/capabilities` 覆盖 sampler、scheduler、upscaler、output_format、preview_mode 列表，并读取 `limits`（每边 64…4096、批次 8）与 `features`；`locmodel_status` 全部报告
+- **Latent 系放大真正可用**：工具原先写 `Latent(nearest)`，引擎拼写是 `Latent (nearest)`，无空格写法被 400 拒绝；已修正，且枚举匹配改为忽略空格与符号，`latent(nearest)`、`JPEG` 都能归一
+- **显式尺寸不再被偷改**：两档尺寸策略（见「尺寸与显存策略」）；用户给多少就出多少，仅引擎硬限可缩回并告警
+- **兜底默认与引擎对齐**：`cfg 1.0 / steps 4 / euler`，替代旧的 `7.0 / 20`；`defaults` 缺失时改读 `defaults_by_mode`
+- **新增参数**：`hires_scale`、`hires_custom_sigmas`、`output_format`、`output_compression`、`vae_rel_size_w/h`、`vae_extra_tiling_args`，共 42 项；支持 JPEG/WebP 输出，扩展名随 `output_format`
+- **`generate_image` 支持 `guard` / `dry_run`**：花 GPU 时间之前可先看完整 payload 与 `size_policy`
+- **不支持的能力会明说**：请求当前模型无法兑现的参数时给 note，而不是静默无效
 
 ## 3.0 变更
 完整列表见 [CHANGELOG.md](docs/CHANGELOG.md)。要点：
