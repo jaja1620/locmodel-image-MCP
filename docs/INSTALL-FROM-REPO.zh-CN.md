@@ -49,6 +49,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "$d\install-from-repo.ps1"
 
 ## Linux / macOS
 
+**已实测范围。** Windows 路径（PowerShell 5.1）在 Windows 10 上做过端到端实测：`manifest` / `zip` / `local` 三种来源、哈希校验、宿主注册、MCP `initialize` 握手均通过。POSIX 脚本读取同一份 `manifest.json`、执行同一套校验，但未在真实 macOS/Linux 主机上跑过——若机器没有 `sh` 或某一步失败，改用 `AGENT-INSTALL.md` 的路径 B（自己抓取 payload 文件）并把失败步骤报上来。
+
+
 ```sh
 curl -fsSL https://raw.githubusercontent.com/jaja1620/locmodel-image-MCP/v4.0.0/install/install-from-repo.sh -o /tmp/locmodel-install.sh
 sh /tmp/locmodel-install.sh

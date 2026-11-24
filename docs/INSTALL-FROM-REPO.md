@@ -51,6 +51,9 @@ nothing is written to the registry and no admin rights are needed.
 
 ## Linux / macOS
 
+**Tested where.** The Windows path (PowerShell 5.1) was exercised end to end on Windows 10: manifest / zip / local sources, hash verification, host registration and the MCP `initialize` handshake. The POSIX script consumes the same `manifest.json` and runs the same checks, but it has not been exercised on a real macOS/Linux host — if `sh` is unavailable or a step fails, fall back to path B in `AGENT-INSTALL.md` (fetch the payload files yourself) and report the failing step.
+
+
 ```sh
 curl -fsSL https://raw.githubusercontent.com/jaja1620/locmodel-image-MCP/v4.0.0/install/install-from-repo.sh -o /tmp/locmodel-install.sh
 sh /tmp/locmodel-install.sh

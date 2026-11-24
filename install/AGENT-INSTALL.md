@@ -86,6 +86,11 @@ Success criteria: the script exits 0, prints `OK` for every payload file, prints
 
 ---
 
+> Verified scope: the Windows route is exercised end to end on Windows 10 (sources `manifest`, `zip`,
+> `local`; hash verification; host registration; MCP `initialize` handshake). The POSIX script reuses the
+> same `manifest.json` and the same checks, but it is not exercised on real macOS/Linux hosts — if `sh` is
+> missing or a step fails there, use path B below.
+
 ## 4. Path B — fetch the files yourself
 
 ### 4.1 Resolve the two target directories
