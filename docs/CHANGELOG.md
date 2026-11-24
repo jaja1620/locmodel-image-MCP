@@ -28,6 +28,27 @@ with text-to-video.
   `locmodel_image.py lipsync <status|run>`, forwarded before argparse so each bridge owns its parser.
 - **`tests/test_video.py`** — 23 tests covering payload building, data-URI wrapping, mode gating,
   async submit/poll/save, magic-byte format detection and the lip-sync readiness matrix.
+- **Third install route: from the repository.** `install/` now holds a machine-readable payload
+  contract (`manifest.json`: every file with SHA-256 and size, entrypoints, verification commands,
+  pinned ref; `SHA256SUMS` in `sha256sum -c` format; `hosts.json` for the host → directory table) and
+  the installer that consumes it — `install-from-repo.ps1` (Windows) and `install-from-repo.sh`
+  (Linux/macOS). Both deploy the MCP server to `%LOCALAPPDATA%\locmodel-image\repo` (or
+  `${XDG_DATA_HOME:-~/.local/share}/locmodel-image/repo`) and `SKILL.md` into the host's skills
+  directory, verify every hash before writing, support `manifest` / `zip` / `local` sources
+  (so it works offline from the release asset), write a `locmodel-image.repo-install-report/1`
+  report, and finish with a real MCP `initialize` handshake. Host config files are only touched on
+  request, and always after a `.bak-<timestamp>` copy. The route is additive: it never modifies an
+  existing `locmodel-image-setup.exe` install.
+- **`install/AGENT-INSTALL.md`** — the install spec written for an AI agent rather than a person:
+  three paths (run the installer / fetch the 8 payload files itself / hand a checklist to the human),
+  exact URLs, per-OS destinations, the hash table, two verification commands, the per-host config key,
+  a symptom → meaning → action table, and an explicit list of things an agent must not touch.
+- **`docs/INSTALL-FROM-REPO.md` / `docs/INSTALL-FROM-REPO.zh-CN.md`** — the human-facing guide for
+  the same route: flag tables, exit codes, offline install, registration snippet, verification,
+  uninstall, and how it coexists with the exe tree.
+- **Release asset `locmodel-image-repo-install-v4.0.0.zip`** — `scripts/` + `SKILL.md` + `install/` +
+  `docs/` in one file, for machines with no network at install time
+  (`-Source local` / `--source local`).
 
 ### Changed
 

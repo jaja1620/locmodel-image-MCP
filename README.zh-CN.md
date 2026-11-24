@@ -68,17 +68,75 @@ LocModel 自带完整的本地出图链路，但只提供桌面 GUI。Agent 和�
 
 ## 安装
 
-两种方式，**任选其一**：
+三种方式，**任选其一**：
 
 - **安装程序（单文件 exe，无需 Python）** —— 日常使用推荐。到
   [Releases](https://github.com/jaja1620/locmodel-image-MCP/releases) 下载 `locmodel-image-setup.exe`，
   双击、确认一次即可。它会解包到 `%LOCALAPPDATA%\locmodel-image`，并把 MCP 服务注册进本机检测到的
   所有受支持客户端。Marvis 用户再执行 `locmodel-image-setup.exe emit marvis`，把打印出的指令粘到
   对话框里即可。
+- **从仓库直接安装（可脚本化、哈希校验，不用 exe、不用 clone、不用 pip）** —— 一条命令直接从本仓库
+  取回 MCP 服务与配套 skill，逐个文件按 `install/manifest.json` 校验 SHA-256，装进
+  `%LOCALAPPDATA%\locmodel-image\repo`（Windows）或
+  `${XDG_DATA_HOME:-~/.local/share}/locmodel-image/repo`（Linux/macOS），以及宿主的 skills 目录。
+  Windows / macOS / Linux 通用，也是**能由 AI 智能体自行完成**的那条路线。
+  见下方[从仓库直接安装](#从仓库直接安装)。
 - **源码安装（需要 Python 3.9+，原有方式）** —— 克隆后直接运行，见下。
 
 详细的双语逐步说明（安装 + 使用 + 故障排查）：
 [docs/INSTALL.zh-CN.md](docs/INSTALL.zh-CN.md)（中文）· [docs/INSTALL.md](docs/INSTALL.md)（English）
+
+### 从仓库直接安装
+
+不编译、不解包、不要管理员权限、不写注册表。部署两件东西——**MCP 服务**（`scripts/*.py`，stdio
+JSON-RPC）与 **skill**（`SKILL.md`，纯 Markdown）：
+
+```powershell
+# Windows
+$d = Join-Path $env:TEMP 'locmodel-image-install'
+New-Item -ItemType Directory -Force -Path $d | Out-Null
+Invoke-WebRequest 'https://raw.githubusercontent.com/jaja1620/locmodel-image-MCP/v4.0.0/install/install-from-repo.ps1' `
+  -OutFile "$d\install-from-repo.ps1" -UseBasicParsing
+powershell -NoProfile -ExecutionPolicy Bypass -File "$d\install-from-repo.ps1"
+```
+
+```sh
+# Linux / macOS
+curl -fsSL https://raw.githubusercontent.com/jaja1620/locmodel-image-MCP/v4.0.0/install/install-from-repo.sh -o /tmp/locmodel-install.sh
+sh /tmp/locmodel-install.sh
+```
+
+脚本按固定 ref 逐个下载、对照 `install/SHA256SUMS` 校验 SHA-256、部署、写
+`<MCP_ROOT>/install-manifest.json`，最后发一次 MCP `initialize` 握手证明服务真的在应答。
+`-Register claude|cursor|vscode` 还会把配置条目合并进宿主文件（先留 `.bak-<时间戳>` 备份）；
+Marvis 与 WorkBuddy 运行时自己管配置，所以改为打印可直接粘贴的片段。
+
+| 参数（PS / sh） | 作用 |
+| --- | --- |
+| `-Component` / `--component` | `mcp`、`skill` 或 `both`（默认） |
+| `-Host` / `--host` | `auto`（默认，父目录已存在的宿主全写）、或 `claude`、`marvis`、`workbuddy`、`cursor`、`vscode`、`generic`、`all` |
+| `-Register` / `--register` | 把 MCP 条目写进该宿主配置，带备份 |
+| `-Source` / `--source` | `manifest`（逐文件，默认）、`zip`（release 资产）、`local`（离线，配合 `-FromPath`） |
+| `-DryRun` / `--dry-run` | 只打印计划，不写盘 |
+
+离线安装：到 [Releases](https://github.com/jaja1620/locmodel-image-MCP/releases) 下载
+`locmodel-image-repo-install-v4.0.0.zip`，解压后执行
+`.\install\install-from-repo.ps1 -Source local -FromPath .`
+
+完整说明（载荷清单、退出码、卸载步骤）：
+[docs/INSTALL-FROM-REPO.zh-CN.md](docs/INSTALL-FROM-REPO.zh-CN.md)（中文）·
+[docs/INSTALL-FROM-REPO.md](docs/INSTALL-FROM-REPO.md)（English）
+
+**把安装交给 AI 智能体** —— 只需给它这一句：
+
+> 读 `https://raw.githubusercontent.com/jaja1620/locmodel-image-MCP/v4.0.0/install/AGENT-INSTALL.md`，
+> 按它把 locmodel-image（MCP 服务器 + 配套 skill）装到本机。
+
+[`install/AGENT-INSTALL.md`](install/AGENT-INSTALL.md) 是自洽的安装规范：确切 URL、各系统两个落点
+目录、哈希表、两条验证命令、各宿主配置键，以及明确列出不许动的对象。没有 shell 权限的智能体可以
+自己逐个抓那 8 个载荷文件完成部署；没有网络权限的智能体可以把清单交给人工照做。
+
+仓库安装落在 `repo\` 子目录，绝不改动既有的 `locmodel-image-setup.exe` 安装，两者可共存。
 
 ### 源码安装
 
@@ -345,12 +403,15 @@ python scripts/locmodel_image.py params show --param cfg
 把本仓库（或仅 `SKILL.md`）复制到客户端的技能目录即可：
 
 ```bash
-# Claude / 通用 Agent 技能目录
-cp -r . ~/.claude/skills/locmodel-image
+# Claude / 通用 Agent 技能目录（放 SKILL.md 即可，不必复制整个仓库）
+mkdir -p ~/.claude/skills/locmodel-image && cp SKILL.md ~/.claude/skills/locmodel-image/
 
 # Marvis（Windows）
 xcopy /E /I . "%APPDATA%\Tencent\Marvis\User\<your-id>\skills\custom\locmodel-image"
 ```
+
+用[从仓库直接安装](#从仓库直接安装)时，skill 已随 MCP 一起落到选定宿主的 skills 目录，无需再手工复制；
+`-Host auto` 会给所有已存在的宿主目录各写一份。
 
 支持 front-matter 的客户端会自动读取 `name`、`description`、`version`、`license`。
 

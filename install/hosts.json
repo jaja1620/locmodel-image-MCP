@@ -1,0 +1,76 @@
+{
+  "schema": "locmodel-image.hosts/1",
+  "note": "Paths are expanded by install-from-repo.{ps1,sh}; %VAR% on Windows, ~ on Unix. A host whose directory does not exist is skipped unless --create is given.",
+  "install_root": {
+    "windows": "%LOCALAPPDATA%\\locmodel-image\\repo",
+    "unix": "${XDG_DATA_HOME:-~/.local/share}/locmodel-image/repo"
+  },
+  "skill_root_name": "locmodel-image",
+  "hosts": {
+    "claude": {
+      "label": "Claude Code / Claude Desktop skills",
+      "skill_dir": {
+        "windows": "%USERPROFILE%\\.claude\\skills\\locmodel-image",
+        "unix": "~/.claude/skills/locmodel-image"
+      },
+      "mcp_config": {
+        "windows": "%APPDATA%\\Claude\\claude_desktop_config.json",
+        "unix": "~/Library/Application Support/Claude/claude_desktop_config.json"
+      },
+      "mcp_key": "mcpServers"
+    },
+    "marvis": {
+      "label": "Marvis (Tencent)",
+      "skill_dir": {
+        "windows": "%USERPROFILE%\\.marvis\\skills\\custom\\locmodel-image",
+        "unix": "~/.marvis/skills/custom/locmodel-image"
+      },
+      "mcp_config": null,
+      "mcp_mode": "manual-paste",
+      "manual_hint": "Marvis > Settings > MCP > Add custom server, paste the JSON printed by the installer."
+    },
+    "workbuddy": {
+      "label": "WorkBuddy",
+      "skill_dir": {
+        "windows": "%USERPROFILE%\\.workbuddy\\skills\\locmodel-image",
+        "unix": "~/.workbuddy/skills/locmodel-image"
+      },
+      "mcp_config": null,
+      "mcp_mode": "plugin-marketplace",
+      "manual_hint": "WorkBuddy > Settings > MCP > Add custom server while the app is closed, or drop a plugin into ~/.workbuddy/plugins/marketplaces."
+    },
+    "cursor": {
+      "label": "Cursor",
+      "skill_dir": {
+        "windows": "%USERPROFILE%\\.cursor\\skills\\locmodel-image",
+        "unix": "~/.cursor/skills/locmodel-image"
+      },
+      "mcp_config": {
+        "windows": "%USERPROFILE%\\.cursor\\mcp.json",
+        "unix": "~/.cursor/mcp.json"
+      },
+      "mcp_key": "mcpServers"
+    },
+    "vscode": {
+      "label": "VS Code (native MCP)",
+      "skill_dir": {
+        "windows": "%USERPROFILE%\\.vscode\\skills\\locmodel-image",
+        "unix": "~/.vscode/skills/locmodel-image"
+      },
+      "mcp_config": {
+        "windows": "%USERPROFILE%\\AppData\\Roaming\\Code\\User\\mcp.json",
+        "unix": "~/.config/Code/User/mcp.json"
+      },
+      "mcp_key": "servers"
+    },
+    "generic": {
+      "label": "Any other agent that reads SKILL.md / talks stdio JSON-RPC",
+      "skill_dir": {
+        "windows": "%USERPROFILE%\\.agent-skills\\locmodel-image",
+        "unix": "~/.agent-skills/locmodel-image"
+      },
+      "mcp_config": null,
+      "mcp_mode": "manual-paste"
+    }
+  }
+}
