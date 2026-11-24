@@ -21,24 +21,24 @@
       "path": "scripts/locmodel_mcp.py",
       "role": "mcp",
       "required": true,
-      "bytes": 64993,
-      "sha256": "70bd6cefe517517adff5ad26029cf02bcdd43d1345866e7e7444f2aea845f715",
+      "bytes": 63672,
+      "sha256": "8a325cc7d349fae68b868269bd2ad935766abb3fe90aa6a37c8e20b0f7377ac4",
       "raw": "https://raw.githubusercontent.com/jaja1620/locmodel-image-MCP/v4.0.0/scripts/locmodel_mcp.py"
     },
     {
       "path": "scripts/locmodel_image.py",
       "role": "mcp",
       "required": true,
-      "bytes": 68694,
-      "sha256": "796449ce17b750663883375dbd09e65c9dd35ddf70401271f4063624bc98c4be",
+      "bytes": 67161,
+      "sha256": "1f31381bbb1ba838882ac6e2336a659dee802c8f1e2ea4c5dee5492c3f39fdca",
       "raw": "https://raw.githubusercontent.com/jaja1620/locmodel-image-MCP/v4.0.0/scripts/locmodel_image.py"
     },
     {
       "path": "scripts/locmodel_edit.py",
       "role": "mcp",
       "required": true,
-      "bytes": 64185,
-      "sha256": "99e18dc21f3cc6a886f959aece33589402a9dd5e2eaa1df7130c8da4221f49e2",
+      "bytes": 62691,
+      "sha256": "188d21de2d7da704ccbbba067b9ac9c876f3af871e6c768d9a1e9f944de390c1",
       "raw": "https://raw.githubusercontent.com/jaja1620/locmodel-image-MCP/v4.0.0/scripts/locmodel_edit.py"
     },
     {
@@ -53,16 +53,16 @@
       "path": "scripts/locmodel_video.py",
       "role": "mcp",
       "required": true,
-      "bytes": 30836,
-      "sha256": "dc75ef8329d9a31e0693e37db5fec54aa45a0db2d47d4d2968ea090ae709fbee",
+      "bytes": 30187,
+      "sha256": "67e2edbdf18b96bc37834ec8e09c485d47cfbaaa1e109f6b55e2debf54a14398",
       "raw": "https://raw.githubusercontent.com/jaja1620/locmodel-image-MCP/v4.0.0/scripts/locmodel_video.py"
     },
     {
       "path": "scripts/locmodel_lipsync.py",
       "role": "mcp",
       "required": true,
-      "bytes": 45310,
-      "sha256": "872d4b5f18c06c41d253544a0dbc923312825b04fa4dba45acb3c83f6225f385",
+      "bytes": 44310,
+      "sha256": "79f09a928168f5ff0f23e00f1332015fc9f9201069dfc41ce225383dee1ca09e",
       "raw": "https://raw.githubusercontent.com/jaja1620/locmodel-image-MCP/v4.0.0/scripts/locmodel_lipsync.py"
     },
     {
@@ -77,16 +77,16 @@
       "path": "SKILL.md",
       "role": "skill",
       "required": true,
-      "bytes": 44458,
-      "sha256": "b270b2e5e4c139c0b831b6de8b62e52f4be21b36b3c417a2eb53e35358fa8834",
+      "bytes": 43863,
+      "sha256": "d5e7c311264996395c9c94fefea43d867b14d0a5bc747a3228d4f3390aa0e420",
       "raw": "https://raw.githubusercontent.com/jaja1620/locmodel-image-MCP/v4.0.0/SKILL.md"
     },
     {
       "path": "pyproject.toml",
       "role": "meta",
       "required": false,
-      "bytes": 1265,
-      "sha256": "ea22b89cec6490e9eb4c35d44a582b6f98e45e59e5411e3d88c4e82eb89f4998",
+      "bytes": 1235,
+      "sha256": "054c104831e549849473a583229ce1bb4103a8311f85fdb12458ca29b794a883",
       "raw": "https://raw.githubusercontent.com/jaja1620/locmodel-image-MCP/v4.0.0/pyproject.toml"
     },
     {
@@ -101,8 +101,8 @@
       "path": "README.md",
       "role": "doc",
       "required": false,
-      "bytes": 44887,
-      "sha256": "680201446ccb6bfb61e30ca621107515f3eb681f4dea2ac9ad39469981a5d8ad",
+      "bytes": 44010,
+      "sha256": "68e507e3245973be15a747adf74188d6384d6e58709985c529e24b35c26bc6e9",
       "raw": "https://raw.githubusercontent.com/jaja1620/locmodel-image-MCP/v4.0.0/README.md"
     },
     {

@@ -137,8 +137,8 @@ Compute SHA-256 of every downloaded file and compare with `{RAW_BASE}/install/SH
 `SKILL.md` for the skill file and `scripts/x.py` for the modules):
 
 ```
-b270b2e5e4c139c0b831b6de8b62e52f4be21b36b3c417a2eb53e35358fa8834  SKILL.md
-70bd6cefe517517adff5ad26029cf02bcdd43d1345866e7e7444f2aea845f715  scripts/locmodel_mcp.py
+d5e7c311264996395c9c94fefea43d867b14d0a5bc747a3228d4f3390aa0e420  SKILL.md
+8a325cc7d349fae68b868269bd2ad935766abb3fe90aa6a37c8e20b0f7377ac4  scripts/locmodel_mcp.py
 ```
 
 If one hash mismatches: delete that file, re-download once, re-check. If it still mismatches, stop
