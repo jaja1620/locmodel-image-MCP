@@ -73,6 +73,7 @@ with text-to-video.
   （原先它们绕开 argparse，`--help` 里完全看不到）；新增 `lipsync help` 打印用法与"未挂载即整体失败"的硬约束。
 - **MCP 的 `lipsync_status` 返回精简**：去掉同名 verbose 事实表，只留 agent 可行动的字段
   （`ok` / `variant` / `models` / `missing` / `paths` / `hardware` / `mount_required` / `mount_hint` / `blocking`）。
+- **仓库安装的哈希与分发内容对齐了。** `install/manifest.json` 原先对工作区里的 CRLF 副本求 SHA-256，而 `raw.githubusercontent.com` 与 release 里的 zip 分发的是仓库中的 LF blob，于是 `-Source manifest` 下载下来的每个脚本都会校验失败、安装无法完成。现在 `files[].sha256` / `files[].bytes` 一律按 git blob 计算，`SHA256SUMS` 与 `AGENT-INSTALL.md` 里的示例哈希同步重算；`manifest` / `zip` / `local` 三种来源的校验结果一致。
 
 ### Known constraints
 
