@@ -193,7 +193,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(edit["priority"], ["qwen-image-edit", "flux2-klein", "qwen-image"])
         self.assertTrue(edit["prefer_loaded"])
         self.assertTrue(edit["auto_load"])
-        self.assertEqual(core.VERSION, "3.2.0")
+        self.assertEqual(core.VERSION, "4.0.0")
 
     def test_mcp_exposes_the_edit_tools(self):
         import locmodel_mcp as mcp

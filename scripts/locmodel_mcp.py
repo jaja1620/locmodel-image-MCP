@@ -51,8 +51,24 @@ except Exception as _exc:  # pragma: no cover - surfaced through tool errors
 else:
     _EDIT_IMPORT_ERROR = None
 
+try:
+    import locmodel_video as video  # noqa: E402  (引擎原生 vid_gen：GUI 视频→生成视频)
+except Exception as _exc:  # pragma: no cover - surfaced through tool errors
+    video = None
+    _VIDEO_IMPORT_ERROR = _exc
+else:
+    _VIDEO_IMPORT_ERROR = None
+
+try:
+    import locmodel_lipsync as lipsync  # noqa: E402  (GUI 视频→对口型视频 独立管线)
+except Exception as _exc:  # pragma: no cover - surfaced through tool errors
+    lipsync = None
+    _LIPSYNC_IMPORT_ERROR = _exc
+else:
+    _LIPSYNC_IMPORT_ERROR = None
+
 SERVER_NAME = "locmodel-image"
-SERVER_VERSION = core.VERSION if core else "3.2.0"
+SERVER_VERSION = core.VERSION if core else "4.0.0"
 SUPPORTED_PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
 DEFAULT_PROTOCOL_VERSION = "2024-11-05"
 
@@ -468,7 +484,229 @@ TOOLS += [
             "required": ["model"],
         },
     },
+    {
+        "name": "lipsync_status",
+        "description": (
+            "Check whether LocModel's built-in lipsync (对口型视频) pipeline is ready: GUI sub-panel "
+            "视频 → 对口型视频, InfiniteTalk + Wan2.1-I2V-14B-480P, its own venv and model dir. "
+            "This pipeline is INDEPENDENT from the sd-server engine, so engine_doctor / locmodel_status "
+            "do not cover it. Call this before lipsync_generate; if the dedicated models are not "
+            "mounted inside LocModel the whole task fails and there is no fallback."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "refresh": {"type": "boolean", "description": "Re-scan the model dir (default true)."},
+                "models_dir": {"type": "string", "description": "Override the lipsync model root."},
+            },
+        },
+    },
+    {
+        "name": "lipsync_generate",
+        "description": (
+            "Generate a singing / talking head video: one portrait image + one audio file -> mp4 whose "
+            "mouth follows the song. Same pipeline as GUI 视频 → 对口型视频 (InfiniteTalk, "
+            "Wan2.1-I2V-14B-480P fp8 or GGUF, Demucs vocal separation, chinese-wav2vec2). Requires the "
+            "dedicated models and runtime downloaded and mounted inside LocModel first (about 24.2 GB "
+            "models + 6 GB CUDA torch); without them the job fails outright. Slow: a 1-minute song "
+            "takes tens of minutes even on a 4090."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "image": {"type": "string", "description": "Absolute path to a portrait photo "
+                                                          "(jpg/png/webp/bmp)."},
+                "audio": {"type": "string", "description": "Absolute path to the song or voice track "
+                                                          "(mp3/wav/m4a/flac/ogg/aac)."},
+                "prompt": {"type": "string", "description": "Scene / behaviour description, e.g. "
+                                                           "'a young woman singing warmly to the "
+                                                           "camera in a cafe'. Default 'a person is "
+                                                           "singing and speaking to the camera'."},
+                "negative": {"type": "string", "description": "Negative prompt (default: LocModel's "
+                                                             "built-in one)."},
+                "res": {"type": "string", "enum": ["480", "720", "custom"],
+                        "description": "Resolution bucket: 480 (default, fits 8 GB VRAM) / 720 / "
+                                       "custom (then width+height are required)."},
+                "width": {"type": "integer", "description": "Only for res=custom; rounded to 16, "
+                                                            "range 256..1920."},
+                "height": {"type": "integer", "description": "Only for res=custom; rounded to 16, "
+                                                             "range 256..1920."},
+                "crop": {"type": ["string", "object"],
+                         "description": "'full' (default) / 'head' (upper-middle square, best for "
+                                        "talking heads) / 'upper' (upper half) or {x,y,w,h} "
+                                        "normalised 0..1."},
+                "steps": {"type": "integer", "description": "Sampling steps (default 4 with accel, "
+                                                           "40 without)."},
+                "accel": {"type": "boolean", "description": "Use the lightx2v distill LoRA (default "
+                                                           "true -> 4 steps)."},
+                "seed": {"type": "integer", "description": "Seed, -1 = random (default -1)."},
+                "max_seconds": {"type": "number", "description": "Render only the first N seconds of "
+                                                                "the audio (0 = whole song)."},
+                "vocals": {"type": "string", "enum": ["auto", "none"],
+                           "description": "auto (default) separates the vocals with Demucs to drive "
+                                          "the mouth; none uses the raw audio."},
+                "color_fix": {"type": "number",
+                              "description": "Colour-correction strength, 1.0 = LocModel default."},
+                "crf": {"type": "integer",
+                        "description": "H.264 CRF for the mp4, default 18 (LocModel's GUI ships 17); "
+                                       "higher = smaller and softer."},
+                "vae_tiled": {"type": "boolean",
+                              "description": "Tiled VAE decode to fit smaller VRAM (default false)."},
+                "sage": {"type": "boolean",
+                         "description": "Use SageAttention when the venv has it (default true)."},
+                "output_dir": {"type": "string", "description": "Folder for the mp4 (default: "
+                                                               "config output_dir or "
+                                                               "~/Pictures/LocModel)."},
+                "timeout_s": {"type": "integer", "description": "Hard timeout in seconds (default: no "
+                                                               "limit; long songs take a long time)."},
+                "dry_run": {"type": "boolean", "description": "Assemble and validate the job without "
+                                                             "running inference."},
+            },
+            "required": ["image", "audio"],
+        },
+    },
 ]
+
+
+_LIPSYNC_KEEP = ("ok", "version", "sub_panel", "variant", "paths", "models", "missing",
+                 "hardware", "notes", "mount_required", "mount_hint", "blocking", "report")
+
+
+def _lipsync_slim(res: dict) -> dict:
+    """Drop the verbose fact tables; keep what an agent needs to act on."""
+    slim = {k: res[k] for k in _LIPSYNC_KEEP if k in res}
+    for k, v in res.items():
+        if k not in slim and k != "summary" and not isinstance(v, (dict, list)):
+            slim[k] = v
+    if "pipeline_facts" in res:
+        slim["pipeline"] = res.get("pipeline")
+        slim["host_commands"] = res["pipeline_facts"].get("host_commands")
+    return slim
+
+
+def _status_text(res: dict) -> dict:
+    """Compact, path-first report: MCP transports truncate long payloads, so the
+    paths an agent must act on go to the top instead of inside a nested JSON."""
+    lines = []
+    if res.get("summary"):
+        lines.append(str(res["summary"]))
+    paths = res.get("paths") or {}
+    for key in ("models_root", "lipsync_root", "python", "code_dir", "runner", "jobs_root"):
+        if paths.get(key):
+            lines.append(f"{key}: {paths[key]}")
+    found = {k: v for k, v in (res.get("models") or {}).items() if v}
+    if found:
+        short = []
+        for k, v in found.items():
+            name = os.path.basename(str(v).rstrip("\\/")) or str(v)
+            short.append(f"{k}={name}")
+        lines.append("found: " + ", ".join(short))
+    else:
+        lines.append("found: none")
+    missing = res.get("missing") or []
+    if missing:
+        lines.append("missing: " + "; ".join(
+            "%s(%s)" % (i.get("key"), i.get("need")) for i in missing))
+    var = res.get("variant") or {}
+    if var:
+        lines.append("variant: %s / %s" % (var.get("variant"), var.get("reason")))
+    hw = res.get("hardware") or {}
+    if hw:
+        lines.append("hardware: ram=%s GB, vram=%s GB" % (hw.get("ram_gb"), hw.get("vram_gb")))
+    for note in (res.get("notes") or []):
+        lines.append(f"note: {note}")
+    if res.get("blocking"):
+        lines.append(f"blocking: {res['blocking']}")
+    if res.get("host_commands"):
+        lines.append("host_commands: " + " | ".join(res["host_commands"]))
+    return {"content": [{"type": "text", "text": "\n".join(lines)}]}
+
+
+def _lipsync_text(res: dict) -> dict:
+    """Summary first (what an agent reads), full structured payload after it."""
+    out = dict(res)
+    summary = out.pop("summary", "")
+    body = json.dumps(out, ensure_ascii=False, indent=2)
+    return {"content": [{"type": "text", "text": f"{summary}\n\n{body}" if summary else body}]}
+
+
+def _lipsync_call(name: str, args: dict) -> dict:
+    """Handle the lipsync tools. They never touch the sd-server engine."""
+    if lipsync is None:  # pragma: no cover
+        return _error(f"lipsync module unavailable: {_LIPSYNC_IMPORT_ERROR}")
+    cfg = core.load_config() if core else {}
+    try:
+        if name == "lipsync_status":
+            res = lipsync.status(cfg, refresh=bool(args.get("refresh", True)),
+                                 models_dir=args.get("models_dir"))
+            if not res.get("ok"):
+                need = "; ".join("%s (%s)" % (i.get("need"), i.get("where"))
+                                 for i in (res.get("missing") or [])[:6])
+                res["summary"] = (
+                    "NOT READY - 未在 LocModel 挂载专用模型将导致整体任务失败。\n"
+                    f"missing: {need or 'unknown'}\n"
+                    f"how to fix: {lipsync.MOUNT_HINT}"
+                )
+                # pipeline_facts 全文太长会把关键路径挤出 agent 的可见窗口，这里只留一行
+                return _status_text(res)
+            rep = res.get("report") or {}
+            var = rep.get("variant") or {}
+            lines = [
+                "READY - 对口型视频管线可用",
+                f"variant: {var.get('variant')} ({var.get('label')})",
+                f"python: {(rep.get('paths') or {}).get('python')}",
+                f"models_root: {(rep.get('paths') or {}).get('models_root')}",
+                f"pipeline: {res.get('pipeline')}",
+                f"gui: {lipsync.PIPELINE_FACTS['gui_path']}",
+            ]
+            res["summary"] = "\n".join(lines)
+            return _status_text(res)
+
+        image = args.get("image") or ""
+        audio = args.get("audio") or ""
+        if not image or not audio:
+            return _error("Missing required arguments: image and audio.")
+        res = lipsync.generate(
+            image, audio, cfg,
+            prompt=args.get("prompt", ""),
+            negative=args.get("negative", ""),
+            res=str(args.get("res") or "480"),
+            width=args.get("width"),
+            height=args.get("height"),
+            crop=args.get("crop"),
+            steps=args.get("steps"),
+            accel=bool(args.get("accel", True)),
+            seed=int(args.get("seed", -1)),
+            max_seconds=float(args.get("max_seconds") or 0),
+            vocals=str(args.get("vocals") or "auto"),
+            output_dir=args.get("output_dir"),
+            timeout_s=int(args.get("timeout_s") or 0),
+            dry_run=bool(args.get("dry_run", False)),
+        )
+        if res.get("dry_run"):
+            lines = ["dry run: job assembled, inference not started",
+                     f"job: {res['job_json']}",
+                     f"would write: {res['output']}",
+                     f"variant: {res['variant']} | res: {res['res']} | steps: {res['steps']}"]
+            res["summary"] = "\n".join(lines)
+            return _lipsync_text(res)
+        if not res.get("ok"):
+            detail = res.get("detail") or ""
+            return _error((f"Lipsync failed: {res.get('message')}\n{detail}").strip(),
+                          res.get("hint"))
+        lines = [f"video: {res['output']}",
+                 f"variant: {res['variant']} | res: {res['res']} | steps: {res['steps']}",
+                 f"elapsed: {res.get('elapsed_s')}s | video_seconds: {res.get('video_seconds')}"]
+        if res.get("stages"):
+            lines.append("stages: " + " -> ".join("%s(%s%%)" % (s.get("stage"), s.get("pct"))
+                                                 for s in res["stages"][-8:]))
+        res["summary"] = "\n".join(lines)
+        return _lipsync_text(res)
+    except lipsync.LipsyncError as exc:
+        return _error(str(exc), getattr(exc, "hint", ""))
+    except Exception as exc:
+        log(traceback.format_exc())
+        return _error(f"{type(exc).__name__}: {exc}")
 
 
 def _text(payload) -> dict:
@@ -502,7 +740,214 @@ def _wf_table(cfg: dict, include_folded: bool = False, live: bool = True) -> lis
                                include_folded=include_folded)
 
 
+TOOLS += [
+    {
+        "name": "generate_video",
+        "description": (
+            "Generate a video with the engine-native endpoint POST /sdcpp/v1/vid_gen — this is "
+            "LocModel GUI 视频 → 生成视频 (text/image to video, e.g. Wan2.2-TI2V, Wan2.1, LTX), NOT "
+            "the lip-sync sub-panel. Returns a job_id immediately (wait_seconds=0) because a clip "
+            "takes minutes; poll with job_status. Do NOT use it for 对口型视频 -> use lipsync_generate."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "prompt": {"type": "string", "description": "Text prompt describing the shot."},
+                "negative_prompt": {"type": "string", "description": "Negative prompt."},
+                "width": {"type": "integer", "description": "Default 832; multiple of 8, 64..4096."},
+                "height": {"type": "integer", "description": "Default 480; multiple of 8, 64..4096."},
+                "fps": {"type": "integer", "description": "Default from the engine (16 for Wan2.2-TI2V)."},
+                "video_frames": {"type": "integer",
+                                 "description": "Frame count; the engine rounds it to the recipe's "
+                                                "frame_step (4/8/17)."},
+                "steps": {"type": "integer", "description": "Sampling steps (engine default 4)."},
+                "flow_shift": {"type": "number", "description": "Flow shift (engine default 12.0)."},
+                "cfg_scale": {"type": "number", "description": "maps to sample_params.guidance.txt_cfg."},
+                "scheduler": {"type": "string",
+                              "description": "'discrete' / 'karras' / 'exponential' ... 'default' is "
+                                             "rejected by the engine."},
+                "sample_method": {"type": "string", "description": "Sampler name, e.g. 'euler'."},
+                "custom_sigmas": {"type": "array", "items": {"type": "number"},
+                                  "description": "Numeric sigma array (numeric only; names/CSV are 400)."},
+                "seed": {"type": "integer", "description": "-1 / omit for random."},
+                "output_format": {"type": "string", "enum": ["webm", "webp", "avi"],
+                                  "description": "Default webm."},
+                "init_image": {"type": "string",
+                               "description": "Local image path / data URI / base64 (i2v, first frame)."},
+                "end_image": {"type": "string",
+                              "description": "Last frame for flf2v recipes."},
+                "ref_images": {"type": "array", "items": {"type": "string"},
+                               "description": "Reference images (data URI / path)."},
+                "control_frames": {"type": "array", "items": {"type": "string"},
+                                   "description": "VACE control frames."},
+                "vace_strength": {"type": "number", "description": "VACE strength."},
+                "moe_boundary": {"type": "number",
+                                 "description": "MoE boundary for two-expert models (Wan2.2 A14B)."},
+                "high_noise_steps": {"type": "integer",
+                                     "description": "Two-pass sampling; NOT supported by "
+                                                    "Wan2.2-TI2V (400)."},
+                "vae_tiling": {"type": "boolean", "description": "Enable VAE tiling to save VRAM."},
+                "wait_seconds": {"type": "number",
+                                 "description": "0 (default) = return job_id immediately; >0 = wait "
+                                                "that long then report."},
+                "output_dir": {"type": "string", "description": "Where to save the video file."},
+                "dry_run": {"type": "boolean", "description": "Only build and return the payload."},
+            },
+            "required": ["prompt"],
+        },
+    },
+    {
+        "name": "job_status",
+        "description": (
+            "Poll a vid_gen job created by generate_video (GET /sdcpp/v1/jobs/{id}) and save the "
+            "finished video. The engine keeps results for ~600 s only."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "job_id": {"type": "string", "description": "Job id returned by generate_video."},
+                "save_result": {"type": "boolean", "description": "Save the file when completed "
+                                                                  "(default true)."},
+                "output_dir": {"type": "string", "description": "Where to save the video file."},
+            },
+            "required": ["job_id"],
+        },
+    },
+    {
+        "name": "cancel_job",
+        "description": "Cancel a queued or running vid_gen job (POST /sdcpp/v1/jobs/{id}/cancel). "
+                       "LocModel 3.3.0 returns 410, 3.6.x supports it.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"job_id": {"type": "string", "description": "Job id to cancel."}},
+            "required": ["job_id"],
+        },
+    },
+    {
+        "name": "list_recipes",
+        "description": "List engine recipes (GET /sdcpp/v1/recipes) with slots / required_any / "
+                       "size_multiple / defaults. kind='video' keeps only video recipes — use it to "
+                       "see which video models the engine can drive.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"kind": {"type": "string", "enum": ["video", "all"],
+                                    "description": "Filter (default all)."}},
+        },
+    },
+]
+
+
+def _video_text(res: dict) -> dict:
+    out = dict(res)
+    summary = out.pop("summary", "")
+    body = json.dumps(out, ensure_ascii=False, indent=2)
+    return {"content": [{"type": "text", "text": f"{summary}\n\n{body}" if summary else body}]}
+
+
+def _video_call(name: str, args: dict) -> dict:
+    """Engine-native video generation (GUI 视频 → 生成视频)."""
+    if video is None:  # pragma: no cover
+        return _error(f"video module unavailable: {_VIDEO_IMPORT_ERROR}")
+    cfg = core.load_config() if core else {}
+    try:
+        if name == "list_recipes":
+            kind = args.get("kind") or "all"
+            res = video.recipes(None if kind in ("all", "", None) else kind, cfg)
+            rows = res.get("recipes") or []
+            head = "\n".join(
+                "- %s (slots=%s, required_any=%s)" % (r["id"], ",".join(map(str, r["slots"])) or "-",
+                                                     r.get("required_any"))
+                for r in rows[:12])
+            res["summary"] = (f"{res['count']} recipe(s) (kind={kind}). 视频 recipe 需要 vae/tae "
+                              f"槽位与对应的视频主模型；未挂载专用模型将导致整体任务失败。\n{head}")
+            return _video_text(res)
+
+        if name == "cancel_job":
+            job_id = (args.get("job_id") or "").strip()
+            if not job_id:
+                return _error("Missing required argument: job_id.")
+            res = video.cancel(job_id, cfg)
+            res["summary"] = f"cancel requested for {job_id}"
+            return _video_text(res)
+
+        if name == "job_status":
+            job_id = (args.get("job_id") or "").strip()
+            if not job_id:
+                return _error("Missing required argument: job_id.")
+            res = video.status(job_id, cfg, output_dir=args.get("output_dir"),
+                               filename_prefix=args.get("filename_prefix") or "LocModel_vid",
+                               save_result=bool(args.get("save_result", True)))
+            st = str(res.get("status") or "").lower()
+            prog = res.get("progress") or {}
+            lines = [f"job {job_id}: {st}",
+                     f"progress: stage={prog.get('stage')} pass={prog.get('pass')}/{prog.get('total')} "
+                     f"elapsed={prog.get('elapsed_ms')}ms"]
+            if res.get("error"):
+                lines.append(f"error: {res['error']}")
+            if res.get("files"):
+                lines.append("saved: " + ", ".join(f["path"] for f in res["files"]))
+            elif st == "completed":
+                lines.append("completed but nothing saved (result expired or save disabled)")
+            res["summary"] = "\n".join(lines)
+            return _video_text(res)
+
+        prompt = (args.get("prompt") or "").strip()
+        if not prompt:
+            return _error("Missing required argument: prompt.")
+        res = video.generate(
+            prompt, cfg,
+            negative_prompt=args.get("negative_prompt", ""),
+            width=int(args.get("width") or 832),
+            height=int(args.get("height") or 480),
+            fps=args.get("fps"),
+            video_frames=args.get("video_frames"),
+            steps=args.get("steps"),
+            flow_shift=args.get("flow_shift"),
+            cfg_scale=args.get("cfg_scale"),
+            scheduler=args.get("scheduler"),
+            sample_method=args.get("sample_method"),
+            custom_sigmas=args.get("custom_sigmas"),
+            seed=args.get("seed"),
+            output_format=args.get("output_format"),
+            init_image=args.get("init_image"),
+            end_image=args.get("end_image"),
+            ref_images=args.get("ref_images"),
+            control_frames=args.get("control_frames"),
+            vace_strength=args.get("vace_strength"),
+            moe_boundary=args.get("moe_boundary"),
+            high_noise_steps=args.get("high_noise_steps"),
+            vae_tiling=args.get("vae_tiling"),
+            wait_seconds=float(args.get("wait_seconds") or 0),
+            output_dir=args.get("output_dir"),
+            dry_run=bool(args.get("dry_run", False)),
+        )
+        if res.get("dry_run"):
+            res["summary"] = "dry_run: payload validated against the live engine, nothing submitted."
+            return _video_text(res)
+        lines = [f"submitted vid_gen job {res['job_id']} (status={res.get('status')})",
+                 f"poll: job_status(job_id='{res['job_id']}')"]
+        if res.get("files"):
+            lines.append("saved: " + ", ".join(f["path"] for f in res["files"]))
+        if res.get("error"):
+            lines.append(f"error: {res['error']}")
+        if not res.get("ok"):
+            lines.append("hint: 该端点由「视频」选项卡的引擎实例提供；引擎不在 vid_gen 模式或"
+                         "未挂载视频专用模型时整体失败。")
+        res["summary"] = "\n".join(lines)
+        return _video_text(res)
+    except Exception as exc:  # VideoError and friends
+        hint = getattr(exc, "hint", "") or ""
+        code = getattr(exc, "code", "") or type(exc).__name__
+        return _video_text({"ok": False, "error": str(exc), "code": code,
+                            "summary": f"video tool failed [{code}]: {exc}" + (f"\n{hint}" if hint else "")})
+
+
 def call_tool(name: str, args: dict) -> dict:
+    if name in ("lipsync_status", "lipsync_generate"):
+        return _lipsync_call(name, args or {})
+    if name in ("generate_video", "job_status", "cancel_job", "list_recipes"):
+        return _video_call(name, args or {})
+
     missing = _require_core()
     if missing:
         return _error(missing)
@@ -777,9 +1222,15 @@ def handle(req: dict) -> dict | None:
             "capabilities": {"tools": {"listChanged": False}},
             "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
             "instructions": (
-                "Local offline image generation. Call generate_image with an optimised English "
-                "prompt; images are written to disk and absolute paths are returned. "
-                "Call engine_doctor first if generation fails."
+                "Local offline image, video and lip-sync generation via LocModel. Pick the tool "
+                "that matches the sub-panel the user means, they are NOT interchangeable: "
+                "generate_image / edit_image / redraw_image for the 画图 tab; generate_video "
+                "(text- or image-to-video, webm/webp/avi) for 视频 → 生成视频; lipsync_generate "
+                "(portrait + audio -> mp4 whose mouth follows the song) for 视频 → 对口型视频. "
+                "Lip sync needs weights the user installs inside LocModel; without them the job "
+                "fails outright, so call lipsync_status before promising anything. "
+                "generate_video is asynchronous: call it with wait_seconds=0, then poll job_status. "
+                "Call engine_doctor first if image generation fails."
             ),
         })
     if method in ("notifications/initialized", "initialized"):

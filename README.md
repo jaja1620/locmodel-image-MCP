@@ -300,6 +300,12 @@ unreliable on your machine:
 | `list_models` | — | Models reported by the engine |
 | `engine_doctor` | — | Full self-check with pass/fail per item |
 | `engine_discover` | — | Force a port re-scan and report the result |
+| `generate_video` | `prompt` (required), `negative_prompt`, `width`, `height`, `fps`, `video_frames`, `steps`, `flow_shift`, `cfg_scale`, `sampler`, `seed`, `output_format`, `init_image`, `end_image`, `ref_images`, `control_frames`, `wait_seconds`, `dry_run` | `job_id` + `poll_url` immediately (`wait_seconds=0`), or the saved clip path when waiting |
+| `job_status` | `job_id` (required), `output_dir`, `filename_prefix`, `save_result` | Status, progress, queue position, saved absolute paths once completed |
+| `cancel_job` | `job_id` (required) | Cancellation result |
+| `list_recipes` | `kind` (optional, `video`) | Engine recipe list (3.6.x and newer) |
+| `lipsync_status` | — | Lip-sync pipeline health: `ok`, effective variant + reason, the 13 required artifacts, `missing`, paths, hardware |
+| `lipsync_generate` | `image` (required), `audio` (required), `prompt`, `negative`, `res`, `width`, `height`, `crop`, `steps`, `accel`, `seed`, `max_seconds`, `vocals`, `color_fix`, `crf`, `vae_tiled`, `sage`, `output_dir` | Absolute path of the rendered mp4; fails fast with `lipsync_not_mounted` when the pipeline is not installed |
 
 `generate_image` returns `isError: true` with a human-readable `hint` on failure, so the agent can
 act on it instead of retrying blindly.
@@ -697,12 +703,39 @@ directory writability in one shot.
   port was found.
 - **No model management**: loading/unloading, model switching and VRAM budgeting remain LocModel's
   job. This tool never kills processes or unloads models on your behalf.
-- **Not implemented**: standalone upscaling of an existing image, and video generation. Hires-fix
-  upscaling *during* generation is supported (`hires_enabled` + `hires_scale` / `hires_upscaler`);
-  the engine advertises no video mode, so `generate_video` stays out rather than half-working.
+- **Not implemented**: standalone upscaling of an existing image. Hires-fix upscaling *during*
+  generation is supported (`hires_enabled` + `hires_scale` / `hires_upscaler`).
+- **Two video sub-panels, never interchangeable**: `generate_video` drives the engine's `vid_gen`
+  endpoint (text/image-to-video, output webm/webp/avi — no mp4); `lipsync_generate` drives LocModel's
+  built-in InfiniteTalk + Wan2.1-I2V-14B-480P pipeline (portrait image/video + audio -> mp4), which is
+  completely isolated from sd-server.
+- **Lip-sync hard-depends on weights the user installs in LocModel**: without them the whole task
+  fails (`lipsync_not_mounted`). There is no fallback — this bridge will not silently switch to
+  `generate_video` and never goes online. Install via LocModel -> Video -> Lip sync -> one-click
+  preparation (~24.2 GB of weights plus a ~6 GB CUDA runtime).
+- **Mode mutual exclusion**: one engine instance serves one mode at a time, so image generation fails
+  while a `vid_gen` instance owns the GPU.
 - **Text in images**: a limitation of the models, not of the bridge.
 
 ---
+
+## What changed in 4.0
+
+- **"Generate video" sub-panel added** (Video -> Generate video): `generate_video`, `job_status`,
+  `cancel_job`, `list_recipes`, talking to `POST /sdcpp/v1/vid_gen`. Asynchronous by default
+  (`wait_seconds=0` returns a `job_id` right away); `job_status` polls and saves the clip.
+- **"Lip sync" sub-panel added** (Video -> Lip sync, its own sub-UI): `lipsync_status` and
+  `lipsync_generate` drive LocModel's built-in InfiniteTalk + Wan2.1-I2V-14B-480P pipeline. That
+  pipeline is not an HTTP endpoint at all: its weights and its Python 3.12 venv come from LocModel's
+  one-click preparation. **Not installed means total failure (`lipsync_not_mounted`), with no
+  degraded mode.**
+- **Sub-panel -> tool mapping is documented**: `SKILL.md` tells the agent to route by what the user
+  actually asked for, backed by on-machine evidence (LocModel 3.6.1 program strings and the
+  `lipsync/runner.py` it writes) covering the model list and runtime environment.
+- **Embedded `runner.py` copy**: `scripts/lipsync_runner_embed.py` matches what LocModel writes, so
+  the job still launches on a machine where the GUI never ran the pipeline.
+- **Two new CLI entries**: `locmodel_image.py video <status|generate|job|cancel|recipes>` and
+  `locmodel_image.py lipsync <status|run>`.
 
 ## What changed in 3.2
 

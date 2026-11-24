@@ -261,6 +261,12 @@ stdio 传输，指向 `scripts/locmodel_mcp.py` 即可。若自发现在本机�
 | `list_models` | — | 引擎报告的模型列表 |
 | `engine_doctor` | — | 逐项自检结果 |
 | `engine_discover` | — | 强制重扫端口并返回结果 |
+| `generate_video` | `prompt`（必填）、`negative_prompt`、`width`、`height`、`fps`、`video_frames`、`steps`、`flow_shift`、`cfg_scale`、`sampler`、`seed`、`output_format`、`init_image`、`end_image`、`ref_images`、`control_frames`、`wait_seconds`、`dry_run` | job_id、poll_url（`wait_seconds=0` 时立即返回）；等待模式下返回视频绝对路径 |
+| `job_status` | `job_id`（必填）、`output_dir`、`filename_prefix`、`save_result` | 状态、进度、队列位置、完成后落盘的绝对路径 |
+| `cancel_job` | `job_id`（必填） | 取消结果 |
+| `list_recipes` | `kind`（可选 `video`） | 引擎 recipe 列表（3.6.x 起） |
+| `lipsync_status` | — | 对口型管线体检：`ok`、实际版本与理由、13 个必需件路径、`missing`、路径、硬件 |
+| `lipsync_generate` | `image`（必填）、`audio`（必填）、`prompt`、`negative`、`res`、`width`、`height`、`crop`、`steps`、`accel`、`seed`、`max_seconds`、`vocals`、`color_fix`、`crf`、`vae_tiled`、`sage`、`output_dir` | 成片 mp4 绝对路径（未挂载模型时直接 `lipsync_not_mounted`） |
 
 `generate_image` 失败时返回 `isError: true` 并附可执行 `hint`，Agent 能据此调整而不是盲目重试。
 
@@ -613,10 +619,21 @@ python tests/e2e_matrix.py --stage all       # 全量（8 GB 卡约 10 分钟）
 - **接口面**：面向 stable-diffusion.cpp 服务的 `/sdcpp/v1/*` API，**不兼容** Automatic1111（不使用 `/sdapi/v1/txt2img`）。路径均可配置，路由略有差异的分支可用 `config set engine.*_path` 适配。
 - **自发现是启发式**：同机跑多个引擎时请显式钉死端口，否则可能猜错且无声——这也是 `status` 始终报告"端口是怎么找到的"的原因。
 - **不做模型管理**：加载/卸载、模型切换、显存预算仍归 LocModel 管。本工具绝不替你杀进程或卸载模型。
-- **未实现**：对已有图片单独放大、视频生成。出图过程中的 hires 放大已支持（`hires_enabled` + `hires_scale` / `hires_upscaler`）；引擎未广告视频模式，故 `generate_video` 不做半成品。
+- **未实现**：对已有图片单独放大。出图过程中的 hires 放大已支持（`hires_enabled` + `hires_scale` / `hires_upscaler`）。
+- **视频分两个子界面，不能混用**：`generate_video` 走引擎 `vid_gen`（文生/图生视频，出 webm/webp/avi，无 mp4）；`lipsync_generate` 走 LocModel 内置的 InfiniteTalk + Wan2.1-I2V-14B-480P 独立管线（人物图片 + 音频 → mp4），**与 sd-server 完全隔离**。
+- **对口型视频强依赖用户在 LocModel 挂载专用模型**：模型或运行环境未准备时整体任务直接失败（`lipsync_not_mounted`），本工具不降级、不改走文生视频、不联网。准备入口：LocModel →「视频」→「对口型视频」→「一键准备」（约 24.2 GB 模型 + 约 6 GB CUDA 运行环境）。
+- **模式互斥**：引擎同一时间只服务一种模式，图像实例与 `vid_gen` 实例不能共存；视频作业期间出图会失败。
 - **图内文字**：模型固有限制，与本桥接层无关。
 
 ---
+
+## 4.0 变更
+
+- **新增「生成视频」**（视频 → 生成视频）：`generate_video` / `job_status` / `cancel_job` / `list_recipes` 四个工具，走引擎 `POST /sdcpp/v1/vid_gen`；默认异步（`wait_seconds=0` 立即返 `job_id`），`job_status` 续查并在完成时把视频落盘
+- **新增「对口型视频」**（视频 → 对口型视频，独立子界面）：`lipsync_status` / `lipsync_generate` 两个工具，驱动 LocModel 内置的 InfiniteTalk + Wan2.1-I2V-14B-480P 管线（上传人物图片/视频 + 音频）。该管线不是引擎接口，模型与 venv 都由 LocModel 的「一键准备」安装；**未挂载即整体失败（`lipsync_not_mounted`），无降级路径**
+- **子界面到工具的映射写进文档**：`SKILL.md` 明确「按用户原话选子界面」，并给出本机实测证据（LocModel 3.6.1 主程序字符串 + 它写出的 `lipsync/runner.py`）说明对口型用的模型清单与运行环境
+- **`runner.py` 内置副本**：`scripts/lipsync_runner_embed.py` 与 LocModel 落盘版本同源，GUI 从未跑过、`runner.py` 尚未写出时可自动补齐
+- **CLI 增加两个入口**：`locmodel_image.py video <status|generate|job|cancel|recipes>` 与 `locmodel_image.py lipsync <status|run>`
 
 ## 3.2 变更
 

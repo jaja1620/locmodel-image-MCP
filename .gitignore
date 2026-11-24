@@ -15,3 +15,7 @@ diag.err.txt
 *.png
 !docs/**/*.png
 e2e.log
+.pytmp/
+junit_*.xml
+*_test.log
+test_*.log

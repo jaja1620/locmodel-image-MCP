@@ -62,7 +62,7 @@ from pathlib import Path
 
 import locmodel_workflow as workflow
 
-VERSION = "3.2.0"
+VERSION = "4.0.0"
 APP_NAME = "locmodel-image"
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -1276,9 +1276,34 @@ def _parse_param_list(items: list[str] | None) -> dict:
 
 
 def main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    # `video` / `lipsync` are forwarded before argparse: those bridges own their
+    # own sub-command parsers and must not be squeezed through this one.
+    if argv and argv[0] in ("video", "lipsync"):
+        name, rest = argv[0], argv[1:]
+        try:
+            if name == "video":
+                import locmodel_video as _video
+                return _video.cli(rest)
+            import locmodel_lipsync as _lipsync
+            return _lipsync._cli([name] + rest)
+        except ImportError as exc:  # pragma: no cover - packaging safety net
+            print(json.dumps({"ok": False, "error": "module_missing",
+                              "message": f"{name} bridge unavailable: {exc}"},
+                             ensure_ascii=False, indent=2))
+            return 2
+
     ap = argparse.ArgumentParser(
         prog="locmodel_image.py",
         description=f"LocModel / stable-diffusion.cpp image bridge v{VERSION}",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=("forwarded sub-commands (own parsers, so not listed above):\n"
+                "  video status|generate|job|cancel|recipes"
+                "   -> 视频选项卡 → 生成视频（引擎 vid_gen）\n"
+                "  lipsync status|run"
+                "                   -> 视频选项卡 → 对口型视频（LocModel 独立管线）\n"
+                "注意：对口型视频需要先在 LocModel 里「一键准备」下载并挂载专用模型与运行环境，"
+                "未挂载将导致整体任务失败，没有降级路径。"),
     )
     ap.add_argument("--version", action="version", version=f"{APP_NAME} {VERSION}")
     ap.add_argument("--config", help="path to config.json (default: ~/.locmodel-image/config.json)")

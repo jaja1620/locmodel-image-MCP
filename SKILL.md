@@ -1,7 +1,7 @@
 ---
 name: locmodel-image
-description: 用本机 LocModel（stable-diffusion.cpp / sd-server）的离线画图引擎出图与改图。当用户要求「画一张 / 生成图片 / 出个图 / 给我几张方案草图 / 把这段描述画出来 / 生成配图」，或要求「改这张图 / 把图里的 X 换成 Y / 在图上加个东西 / 只改这块 / 局部重绘 / 在这张图基础上重画」且希望用本机模型、离线处理时使用。覆盖提示词优化、参数选择、掩码标注、局部重绘与整图重画、模型选择与切换、调用入口（MCP 工具或 CLI）、失败排查全流程。不适用：需要精确文字排版的海报（本地扩散模型文字拼写不可靠）、需要联网检索的图、视频生成。
-version: 3.2.0
+description: 用本机 LocModel（stable-diffusion.cpp / sd-server）的离线引擎出图、改图、生成视频与做对口型视频。当用户要求「画一张 / 生成图片 / 出个图 / 给我几张方案草图 / 把这段描述画出来 / 生成配图」，或要求「改这张图 / 把图里的 X 换成 Y / 在图上加个东西 / 只改这块 / 局部重绘 / 在这张图基础上重画」且希望用本机模型、离线处理时使用。覆盖提示词优化、参数选择、掩码标注、局部重绘与整图重画、模型选择与切换、调用入口（MCP 工具或 CLI）、失败排查全流程。不适用：需要精确文字排版的海报（本地扩散模型文字拼写不可靠）、需要联网检索的图。视频部分覆盖 LocModel「视频」选项卡下的两个子界面：「生成视频」（引擎 vid_gen：文生/图生视频）与「对口型视频」（InfiniteTalk + Wan2.1-I2V-14B-480P 独立管线，上传人物图片/视频 + 音频让嘴型跟着唱）。对口型视频必须由用户在 LocModel 里下载并挂载专用模型与运行环境，未挂载将导致整体任务失败，无降级路径。
+version: 4.0.0
 license: MIT
 ---
 
@@ -14,8 +14,8 @@ license: MIT
 
 | 形态 | 入口 | 适用 |
 | --- | --- | --- |
-| **MCP 工具**（首选） | `generate_image` / `edit_image` / `redraw_image` / `list_edit_models` / `load_model` / `locmodel_status` / `list_models` / `engine_doctor` / `engine_discover` | 客户端支持 MCP 时，工具直挂、有 schema 约束，不依赖模型是否"想起"读文档 |
-| **CLI 桥接器** | `python scripts/locmodel_image.py <子命令>` | 脚本化、批处理、无 MCP 环境、排障 |
+| **MCP 工具**（首选） | 图片：`generate_image` / `edit_image` / `redraw_image` / `list_edit_models` / `load_model` / `locmodel_status` / `list_models` / `engine_doctor` / `engine_discover`；视频：`generate_video` / `job_status` / `cancel_job` / `list_recipes`（子界面「生成视频」）、`lipsync_status` / `lipsync_generate`（子界面「对口型视频」） | 客户端支持 MCP 时，工具直挂、有 schema 约束，不依赖模型是否"想起"读文档 |
+| **CLI 桥接器** | `python scripts/locmodel_image.py <子命令>`（图片）；`... video <子命令>`（生成视频）；`... lipsync status|run`（对口型视频） | 脚本化、批处理、无 MCP 环境、排障 |
 
 ## 能力边界（必须先判断）
 
@@ -28,10 +28,12 @@ license: MIT
 - **改图**：给定一张已有图片，用一句话指定"这块改成什么"（局部重绘 / inpaint），或"整体按新描述重画"（`redraw`）
 - 掩码来源三选一：掩码 PNG、矩形 / 多边形坐标、按颜色阈值选区域；掩码外的像素由 CPU 侧还原为原图，不会被改动
 - 模型选择：自动按优先级挑可编辑模型，也能指定具体模型或让引擎先加载
+- **生成视频**：`generate_video` 走引擎 `POST /sdcpp/v1/vid_gen`，文生视频 / 图生视频（`init_image`）/ 首尾帧（`end_image`）/ 参考图（`ref_images`）/ VACE 控制帧，输出 webm / webp / avi；异步 job + `job_status` 续查
+- **对口型视频**：`lipsync_generate` 用一张人物图片 + 一段音频，生成嘴型跟着歌/念白走的 mp4（InfiniteTalk + Wan2.1-I2V-14B-480P，LocModel 自带独立管线）——**前提是用户已在 LocModel 里挂载专用模型与运行环境**，见下文「对口型视频」
 
 做不到（不要承诺）：
 - 图内精确文字、版式排版 → 后期在 PPT/PS/Figma 里叠字
-- 联网素材、写实人脸精修、视频生成
+- 联网素材、写实人脸精修、带音效/配乐的多镜头叙事剪辑（本技能只出单条无声视频片段，对口型除外——它自带原曲音轨）
 - **纯文字编辑**（改海报里的字）→ 扩散模型做不到，说清楚并建议后期叠字
 - 需要专用 inpaint 权重才能保证质量的极端场景（如整脸换人）→ 用 `redraw_image` 整图重画，或说明能力边界
 
@@ -340,6 +342,186 @@ MCP 侧同参数：`edit_image(init_image="D:/out/v1.png", prompt="...", regions
 `files[].path` 返回的就是**已保护**的图（掩码外=原图）；引擎未经保护的原始输出另存在同目录
 `*_raw.png`，字段为 `files[].raw`，只在排查"引擎到底画了什么"时才需要，正常交付不要给用户。
 
+## 视频：先分清两个子界面（分错了必失败）
+
+LocModel 的「视频」选项卡下并排两个子界面，底层实现完全不同，工具不能互换：
+
+| GUI 子界面 | 界面形态 | 底层实现 | 本技能入口 | 走引擎端口 |
+| --- | --- | --- | --- | --- |
+| 视频 → **生成视频** | 填提示词 / 首帧图，选模型与尺寸 | sd-server 的 `POST /sdcpp/v1/vid_gen`（Wan2.2-TI2V、Wan2.1、LTX-2.3、MiniMax-H3 等扩散 recipe） | `generate_video` → `job_status` | 是（sd-server 端口） |
+| 视频 → **对口型视频** | **独立子界面**：上传人物图片（或视频）+ 一首歌 | InfiniteTalk + Wan2.1-I2V-14B-480P，独立 Python 3.12 venv、独立模型目录、本地 `runner.py` 子进程 | `lipsync_status` → `lipsync_generate` | **否**（与 sd-server 完全隔离） |
+
+按用户原话选工具，不要因为"都是视频"就合并：
+
+- 「生成一段视频 / 文生视频 / 图生视频 / 让这张图动起来 / 来个空镜」→ `generate_video`
+- 「对口型 / 让这张照片唱歌 / 人物开口说话 / 数字人播报 / 嘴型对上这段音频」→ `lipsync_generate`
+- 只要诉求里出现"音频驱动嘴型"，就不能用 `generate_video`：引擎侧没有 audio→lip 通道，`ref_audios` / `ref_video_audios` 无论传什么都是 400
+- 反过来 `lipsync_generate` 也不接管提示词出片：它必须有「一张人物图片或视频 + 一段音频」，只做单人口型驱动
+
+### 生成视频（视频 → 生成视频，引擎 vid_gen）
+
+前置：当前引擎实例必须处于 `vid_gen` 模式。图像实例与视频实例**不能共存**——LocModel 同一时间只跑一个模式：
+
+```
+locmodel_image.py video status        # 或 MCP: generate_video(dry_run=true 前置不查这个)
+```
+
+`mode.current_mode` 不是 `vid_gen` 时，工具会报 `video_mode_required`；此时让用户在 LocModel「视频 → 生成视频」页面点一次生成（GUI 会把引擎切到该模式），或先跑一次 GUI。**不要**用 `load_model` 去"切模式"，那是图像模型接口。
+
+关键参数（MCP `generate_video` 与 CLI `video generate` 同名）：
+
+| 参数 | 默认 | 说明 |
+| --- | --- | --- |
+| `prompt` | 必填 | 镜头描述。写"谁在做什么 + 镜头怎么动"，例：`a slow dolly-in on a modular cabin in snowfall, warm interior light` |
+| `width` / `height` | 832×480 | 8 的倍数（部分 recipe 要 16 或 32）；显存 8 GB 建议 ≤832×480 |
+| `video_frames` | 引擎按 recipe 定 | 帧数会被 recipe 的 `frame_step`（4 / 8 / 17）取整，写多少都不报错，但结果可能不是你写的数 |
+| `fps` | 引擎默认（Wan2.2-TI2V 为 16） | 部分 recipe 固定 24 fps，改不动 |
+| `steps` / `flow_shift` / `cfg_scale` / `sampler` | 引擎默认（如 4 / 12.0 / 1.0 / euler） | `scheduler` 不要写 `default`，引擎回 400 |
+| `output_format` | `webm` | 只能是 `webm` / `webp` / `avi`（**没有 mp4**，要 mp4 请用户自己转，或用 `lipsync_generate`） |
+| `init_image` | — | 图生视频首帧：本地路径 / data URI / 裸 base64 都收 |
+| `end_image` | — | 首尾帧 recipe 的尾帧 |
+| `ref_images` / `control_frames` | — | 参考图数组 / VACE 控制帧数组 |
+| `wait_seconds` | `0` | **默认立即返回 `job_id`**：一条 480P 片段要几分钟，MCP 客户端会超时。要阻塞就设成秒数 |
+
+异步三步（默认路径）：
+
+1. `generate_video(prompt=...)` → 立刻拿到 `job_id`、`poll_url`
+2. `job_status(job_id=...)` 轮询；`status` 走 `queued` → `running` → `completed`，`progress.stage` 会给出当前阶段
+3. `completed` 后工具自动把视频落到输出目录并返回**绝对路径**；`failed` 时看 `error`
+
+引擎只在内存里保留结果约 **600 秒**（`--completed-ttl-seconds=600`），超时不再可取——所以拿到 `job_id` 后要接着轮询，别拖到第二天。
+
+本机实测（LocModel 3.6.1，RTX 3060 Ti 8 GB）：Wan2.2-TI2V-5B-Q4_K_M + umt5-xxl-encoder-Q8_0 + wan2.2_vae，832×480 / 9 帧 / fps16 / 2 steps → 1.27 MB 合法 WebM，耗时 123 s（含首次加载模型约 40 s、VAE 解码 21 s）。
+
+```bash
+# 提交并立即返回 job_id（默认）
+python scripts/locmodel_image.py video generate --prompt "slow dolly-in on a wooden cabin, snowfall" \
+  --width 832 --height 480 --frames 9 --fps 16 --out "D:/out"
+
+# 直接阻塞等到完成（一条 480P 片子通常 2–5 分钟，留足 --timeout）
+python scripts/locmodel_image.py video generate --prompt "..." --wait 900
+
+# 续查 + 取消 + 看 video recipe
+python scripts/locmodel_image.py video job <job_id> --out "D:/out"
+python scripts/locmodel_image.py video cancel <job_id>
+python scripts/locmodel_image.py video recipes
+```
+
+常见坑：
+
+- 视频实例在跑时**图像出图会全部失败**（模式互斥）：要么让用户切回图像页面，要么等视频跑完
+- 文本编码器 umt5-xxl 的 Q8 版要 ≥6 GB **空闲内存**，不够时报 `RAM weight capacity exceeded`，最终表现为 `generate_video returned no results`
+- `high_noise_steps` 只对双专家模型（Wan2.2-A14B）有效，Wan2.2-TI2V 传它直接 400
+- 引擎对未知字段静默 202，所以"没报错但没反应"多半是参数名写错，客户端校验才是唯一防线
+
+### 对口型视频（视频 → 对口型视频，LocModel 独立管线）
+
+**这不是 sd-server 的功能，是 LocModel 内置的另一套管线。**证据：LocModel 3.6.1 主程序字符串表，以及它写到磁盘的 `%LOCALAPPDATA%\LocModel\lipsync\runner.py`（本技能内置同源副本 `scripts/lipsync_runner_embed.py`，用于 GUI 没跑过、`runner.py` 还没落盘时自动补齐）。
+
+> **硬约束：未在 LocModel 挂载专用模型 → 整体任务失败。**
+> 这条管线不下载即不可用：没有模型、没有 venv、没有 `runner.py` 就直接失败，**本工具不会降级、不会改走 `generate_video`、不会调用云端**。遇到这种情况的唯一正解是让用户打开 LocModel →「视频」→「对口型视频」→「一键准备」把模型与运行环境装完，再重新调用。
+
+它用的模型（都在 LocModel 的「一键准备」里，约 24.2 GB）：
+
+| 角色 | 文件 / 组件 | 说明 |
+| --- | --- | --- |
+| 视频主干 DiT | `Wan2.1-I2V-14B-480P` | high 版 fp8（约 17 GB）/ small 版 Q4_K_M GGUF |
+| 口型驱动 | `InfiniteTalk Single` | 音频交叉注意力权重；high=fp8，small=Q4_K_M GGUF |
+| 加速 LoRA | `lightx2v_I2V_14B_480p_cfg_step_distill_rank64_bf16` | 4 步蒸馏，推理时叠加（`accel=true` 时启用） |
+| 文本编码 | high：`t5_fp8.safetensors` + `t5_map_fp8.json`（optimum-quanto fp8）；small：`umt5-xxl-encoder-Q8_0.gguf` | 配 `umt5-xxl` tokenizer；两档任选其一即算就绪，**不要**因为没有 fp8 就判定缺件 |
+| 图像条件 | open-clip `ViT-H/14` + `xlm-roberta-large` | 人物外观条件 |
+| VAE | `Wan2.1_VAE.pth` | 编解码 |
+| 音频特征 | `chinese-wav2vec2-base`（`wav2vec/`） | 中文音频特征提取 |
+| 人声分离 | Demucs `hybrid-transformer 955717e8-...th` | `vocals=auto` 时先分离人声再驱动口型 |
+
+运行环境（与 LocModel 本体完全隔离，约 6 GB）：
+
+- 独立 **venv（Python 3.12，uv 创建）**，不是 LocModel 自带的 Python
+- 关键包：`torch(CUDA)`、`triton-windows<3.4`、`sageattention==1.0.6`、`diffusers==0.33.1`、`transformers==4.51.3`、`accelerate==1.6.0`、`optimum-quanto==0.2.6`、`gguf==0.17.1`、`demucs==4.0.1`、`openunmix==1.3.0`、`numpy==1.26.4`
+- 环境变量：`TRITON_CACHE_DIR=<lipsync>/triton-cache`、`HF_HUB_OFFLINE=1`、`TRANSFORMERS_OFFLINE=1`、`PYTHONUTF8=1`
+- 硬件：**必须 NVIDIA CUDA**，显存 ≥8 GB；small 版建议 ≥16 GB 内存，high 版 ≥48 GB 内存
+- 路径：模型根默认 `<模型目录>/lipsync`（本机是 `F:\AI-Models\lipsync`，可在 LocModel 设置里改）；程序侧 `<程序数据目录>\lipsync\`（venv、`runner.py`、`jobs\`）
+
+版本选择（GUI 里的「自动 / 高质量版 / 省内存版」）：`auto` 会按内存自动决定——本机 16 GB 内存 → 自动选**省内存版**（high 版要 48 GB 内存起步）。可用环境变量 `LOCMODEL_LIPSYNC_VARIANT=high|small|auto` 或配置 `lipsync.variant` 固定。
+
+#### 调用流程（顺序不能颠倒）
+
+1. **`lipsync_status()`** —— 必做第一步。返回 `ok`、`variant`（实际会用的版本及理由）、`models`（13 个必需件的真实路径）、`missing`（缺哪些）、`paths`、`hardware`。
+2. `ok=false` → **立刻停手，把缺口告诉用户**：列出 `missing[].need`，并给出"LocModel → 视频 → 对口型视频 → 一键准备"这一步。不要尝试自己 pip 装、不要下载权重、不要伪造路径。
+3. `ok=true` → `lipsync_generate(image=..., audio=...)`。
+
+```bash
+python scripts/locmodel_image.py lipsync status          # 就绪体检（JSON）
+python scripts/locmodel_image.py lipsync run --image "D:/me.jpg" --audio "D:/song.mp3" \
+  --prompt "a young woman singing warmly to the camera in a cafe" --res 480 --output-dir "D:/out"
+```
+
+参数：
+
+| 参数 | 默认 | 说明 |
+| --- | --- | --- |
+| `image` | 必填 | 人物图片（png/jpg/webp/bmp/tif）或人物视频（mp4/mov/mkv/webm…） |
+| `audio` | 必填 | 歌或念白（mp3/wav/m4a/flac/ogg/aac） |
+| `prompt` | `a person is singing and speaking to the camera, natural head motion` | 场景 / 行为描述 |
+| `negative` | LocModel 内置负面词 | 一般不用动 |
+| `res` | `480` | `480` / `720` / `custom`；8 GB 显存就用 480 |
+| `width` / `height` | — | 仅 `res=custom` 时必填，256–1920，会被对齐到 16 的倍数 |
+| `crop` | 全图 | 人脸裁切框（归一化），人像在画面里偏小时可指定 |
+| `steps` | 引擎默认（加速 LoRA 下 4 步左右） | 调高更慢 |
+| `accel` | true | 用 lightx2v 蒸馏 LoRA 少步出片 |
+| `vocals` | `auto` | 先 Demucs 分离人声再驱动口型；原曲音轨仍保留在成片里 |
+| `color_fix` | 1.0 | 色彩校正强度 |
+| `crf` | 18 | 成片质量（LocModel GUI 出厂 17）；越高越小越糊 |
+| `vae_tiled` / `sage` | false / true | 省显存 / 用 SageAttention 加速 |
+
+产物：`LocModel_<时间戳>_lipsync.mp4`（libx264，25 fps，音轨用原曲），工具返回**绝对路径**。
+
+耗时要有心理预期，也要提前告诉用户：**4090 上 480P 一分钟的歌要十几分钟到半小时**；3060 Ti 8 GB + 16 GB 内存更慢，长音频建议先剪到 30–60 秒试片。别把它当"几秒钟出片"的工具，也不要因为超时就反复重提——重提只会让队列更长。
+
+#### 两档布局的文件名对照（看 status 的 missing 时用）
+
+`lipsync_status` 不写死发行文件名，而是按 `<模型目录>\lipsync\` 下的路径特征逐个探（大小写不敏感）。两档布局不同，下面是它实际认的东西：
+
+| 角色（`missing[].need`） | 认的路径特征 | 两档差异 |
+| --- | --- | --- |
+| `dit` | `Wan2*I2V*14B*480P*.(safetensors\|gguf)`（排除 infinitetalk / lightx2v / lora / t5） | high 是 `fp8` safetensors，small 是 `Q4_K_M` gguf |
+| `infinitetalk` | `infinitetalk*.(safetensors\|gguf)` | high = fp8，small = Q4_K_M |
+| `t5` | `t5_fp8.safetensors` / `t5*.safetensors` / `umt5-xxl-encoder*.gguf` | **两档任一即算就绪**：high 用 fp8（还要 `t5_map_fp8.json`），small 用 Q8_0 gguf 且不需要 map |
+| `vae` | `Wan2.1_VAE.pth` / `Wan*VAE*.(pth\|safetensors)` / `wan*vae*.safetensors` | high 在 `base/` 下；small 是 `split_files/vae/wan_2.1_vae.safetensors`（小写、不在 base 下） |
+| `umt5` | `google/umt5-xxl/` 或 `umt5-xxl/` 目录 | 两档共用 |
+| `xlm_roberta` | `xlm-roberta-large/` 或 `xlm_roberta_large/` 目录 | 两档共用 |
+| `clip` | `models_clip_open-clip*.pth` | 两档共用 |
+| `wav2vec` | `wav2vec/{preprocessor_config,config}.json` 或 `chinese-wav2vec2*config.json` | 两档共用 |
+| `demucs` | 任意 `*.th` | 两档共用 |
+| `lora` | `lightx2v*.safetensors` | 两档共用（缺它不影响 `ok`，只在 `notes` 里提示） |
+| `base` | `base/config.json`（锚点） | 缺失时回退到 tokenizer 的 `base/` 祖先，再回退到 VAE 父目录 |
+
+本机 16 GB 内存 → `auto` 判为省内存版，所以只探 small 这一列；small 齐了就 `ok=true`，不会因为缺 fp8 而卡住。
+
+#### 本机实测状态（2026-11-24，写文档时）
+
+| 检查项 | 结果 |
+| --- | --- |
+| 模型根 `F:\AI-Models\lipsync` | **不存在**（`D:` / `F:` / `G:` 三个 AI-Models 盘都没有 `lipsync` 目录） |
+| 程序侧 `%LOCALAPPDATA%\LocModel\lipsync` | 目录存在但**为空**：没有 venv、没有 `code\`、没有 `runner.py`、没有 `jobs\` |
+| `settings.json` 里 `lipsync_variant` | `""`（用户没选过版本） |
+| `lipsync_status` | `ok=false`，13 个必需件全部 `missing`，判定为省内存版（auto：15.8 GB RAM < 48 GB） |
+| `lipsync_generate` | 直接抛 `lipsync_not_mounted`，提示"未在 LocModel 挂载专用模型将导致整体任务失败" |
+
+也就是说：**本机当前调不了对口型视频**，这是模型未挂载的正常结果，不是 bug。用户挂载完成后再跑 `lipsync status`，`ok=true` 才可生成。
+
+#### 对口型视频失败对照
+
+| 现象 / 错误码 | 原因 | 处理 |
+| --- | --- | --- |
+| `lipsync_not_mounted` | 专用模型或 venv 没挂载 | 让用户去 LocModel「视频 → 对口型视频 → 一键准备」，装完重试；**不要重试同一个调用** |
+| `runner_missing` | `runner.py` 还没被 GUI 写出，内置副本也缺失 | 让用户在 GUI 里点一次「开始生成」，LocModel 会写出 `runner.py` |
+| `bad_res` | `res=custom` 没给宽高，或宽高超 256–1920 | 改 `res=480` 或给合法宽高 |
+| `bad_arguments` | 图片/音频扩展名不在白名单，或文件不存在 | 换格式（图片 png/jpg，音频 mp3/wav） |
+| CUDA / 显存相关报错 | 显存不够（8 GB 下 720P 基本必爆） | 回到 480P，关掉其它占显存程序 |
+| 出片嘴型呆滞 / 不同步 | 音频里有人声以外的强伴奏、或音频太长 | `vocals=auto` 保留；把歌剪短到一段副歌再试 |
+| 跑很久没动静 | 正常：模型加载 + 逐段生成，一分钟歌十几分钟起 | 耐心等，别重复提交 |
+
 ## 失败排查（按报错对号入座）
 
 | 现象 | 退出码 | 原因 | 处理 |
@@ -358,6 +540,11 @@ MCP 侧同参数：`edit_image(init_image="D:/out/v1.png", prompt="...", regions
 | `bad_arguments` + mask | — | 掩码空白、覆盖整图、不是 8-bit PNG、带 Adam7 交错 | 空白说明没画上；整图覆盖请改用 `redraw_image`；PNG 重导出为 8-bit 非交错 |
 | 改图后接缝明显 | — | `strength` 太高或 `mask_blur` 太小 | 降 `strength`、加 `mask_blur`、扩 `inpaint_padding` |
 | 掩码内几乎没变化 | — | `strength` 太低，或提示词没描述"变成什么" | `strength` 提到 0.8 以上；提示词写具体名词而非"换一下" |
+| `video_mode_required` | — | 引擎当前实例不是 `vid_gen` 模式（图像实例与视频实例互斥） | 让用户在 LocModel「视频 → 生成视频」点一次生成切模式；不要用 `load_model` 切 |
+| `RAM weight capacity exceeded` → `generate_video returned no results` | 2 | umt5-xxl Q8 文本编码器要 ≥6 GB 空闲内存 | 关掉占内存的程序；换更小的编码器或先用 480P 小配置 |
+| 视频 job 一直 `queued` | — | 引擎单 slot，视频一次只跑一个作业 | 等前一个跑完；`job_status` 会返回 `queue_position` |
+| job `failed` 且已经过了 10 分钟才查 | — | 引擎只保留完成结果 600 秒 | 重新提交；下次拿到 `job_id` 立刻轮询 |
+| `lipsync_not_mounted` | — | 对口型专用模型 / venv 未挂载 | 让用户走 LocModel「视频 → 对口型视频 → 一键准备」，装完再 `lipsync status` |
 
 ## 常用命令速查
 
@@ -383,6 +570,17 @@ python scripts/locmodel_image.py edit --image a.png --prompt "..." --region 0.1,
 python scripts/locmodel_image.py edit --image a.png --mask mask.png --prompt "..." --dry-run
 python scripts/locmodel_image.py redraw --image a.png --prompt "..."
 python scripts/locmodel_image.py load-model "Qwen-Image-Edit"
+
+# 子界面「生成视频」（引擎 vid_gen，异步）
+python scripts/locmodel_image.py video status                 # 当前引擎模式 + capabilities
+python scripts/locmodel_image.py video generate --prompt "slow dolly-in on a wooden cabin" --frames 9 --fps 16
+python scripts/locmodel_image.py video job <job_id> --out "D:/out"
+python scripts/locmodel_image.py video cancel <job_id>
+python scripts/locmodel_image.py video recipes                 # 3.6.x 才有；3.3.0 会 404
+
+# 子界面「对口型视频」（InfiniteTalk 独立管线，先体检再出片）
+python scripts/locmodel_image.py lipsync status
+python scripts/locmodel_image.py lipsync run --image "D:/me.jpg" --audio "D:/song.mp3" --res 480 --output-dir "D:/out"
 ```
 
 ## 给用户的交付话术
@@ -391,3 +589,7 @@ python scripts/locmodel_image.py load-model "Qwen-Image-Edit"
 - 尺寸按用户给的原样出时，明确说"就是 512×512"；只有超出引擎硬限（4096）或显存不够才提示，且说清是**警告还是已改尺寸**
 - 若开了 hires，说明是"按 2 倍放大"还是"放大到 2048×1152"，并给出实际产出像素
 - 失败时给出具体下一步（关哪个程序、改哪个参数），不要只说"失败了"
+- 视频出片后同样只报**真实文件绝对路径**；引擎只输出 webm/webp/avi，用户要 mp4 时说明"可以转码"或改用对口型管线（它直接出 mp4）
+- 视频默认异步：拿到 `job_id` 就告诉用户"已提交，我盯着"，然后轮询，不要反复重提同一个任务
+- 对口型视频交付时必须说清三件事：① 用的是 InfiniteTalk + Wan2.1-I2V-14B-480P 本地管线，不是文生视频；② 成片保留原曲音轨、25 fps、mp4；③ 耗时随显卡与音频长度变化（4090 上 480P 一分钟歌约十几分钟到半小时）
+- 对口型**未挂载模型**时，明确告知"没在 LocModel 挂载专用模型会导致整体任务失败，无法降级"，并指向「视频 → 对口型视频 → 一键准备」，不要承诺"我帮你装好"

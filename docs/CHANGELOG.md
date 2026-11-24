@@ -4,6 +4,68 @@ All notable changes to this project are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows [Semantic Versioning](https://semver.org/).
 
+## [4.0.0] — 2026-11-24
+
+Synced with LocModel 3.6.1. LocModel's "视频" tab holds **two unrelated sub-panels**; 4.0 covers
+both, and keeps them apart in the tool surface so an agent can no longer answer a lip-sync request
+with text-to-video.
+
+### Added
+
+- **`generate_video` / `job_status` / `cancel_job` / `list_recipes`** — the "视频 → 生成视频" sub-panel,
+  i.e. the engine's `POST /sdcpp/v1/vid_gen`. Asynchronous by default (`wait_seconds=0` returns a
+  `job_id` and `poll_url` immediately) because a 480P clip takes minutes and MCP clients time out;
+  `job_status` polls, then decodes `result.b64_json` and writes webm/webp/avi to disk. Format is
+  sniffed from RIFF/EBML magic bytes first, so a mislabelled `output_format` cannot corrupt the file.
+- **`lipsync_status` / `lipsync_generate`** — the "视频 → 对口型视频" sub-panel: LocModel's built-in
+  InfiniteTalk + Wan2.1-I2V-14B-480P pipeline. This is *not* an HTTP endpoint: LocModel writes a
+  `runner.py` into its data directory and launches it inside its own Python 3.12 venv, with its own
+  ~24 GB weight tree and offline HF flags. The tool locates those artifacts, reports exactly which of
+  the 13 required pieces are missing, and runs the job in a subprocess.
+- **`scripts/lipsync_runner_embed.py`** — an embedded copy of the runner LocModel writes, so the
+  pipeline can still be driven on a machine where the GUI never ran it.
+- **CLI pass-through**: `locmodel_image.py video <status|generate|job|cancel|recipes>` and
+  `locmodel_image.py lipsync <status|run>`, forwarded before argparse so each bridge owns its parser.
+- **`tests/test_video.py`** — 23 tests covering payload building, data-URI wrapping, mode gating,
+  async submit/poll/save, magic-byte format detection and the lip-sync readiness matrix.
+
+### Changed
+
+- **Sub-panel routing is now documented policy, not a guess.** `SKILL.md` maps user wording to the
+  right sub-panel ("生成视频 / 文生视频 / 图生视频" → `generate_video`, "对口型 / 让照片唱歌 / 数字人播报"
+  → `lipsync_generate`), lists the models and runtime each one needs, and records the on-machine
+  evidence (LocModel 3.6.1 program strings plus the `runner.py` it writes) behind those claims.
+- **Tool count 12 → 18, parameter contract 42 → 50.** No existing tool was renamed or re-scoped.
+- **`pyproject.toml`**: version 4.0.0, module list now covers every bridge module.
+
+### Fixed
+
+- **省内存版的就绪判定不再把 `t5_fp8` 当必需件。** 该档真实布局是
+  `split_files/vae/wan_2.1_vae.safetensors`（小写、不在 `base/` 下）+ `umt5-xxl-encoder-Q8_0.gguf`
+  文本编码器，没有 `t5_fp8.safetensors` / `t5_map_fp8.json`。原实现按高质量档的文件名硬判，
+  small 档会被误报为 `missing: umt5/xlm_roberta` 而永远 `ok=false`。现在文本编码器两档任一即算就绪，
+  tokenizer 按路径独立探测，`base` 只作 runner 拼相对路径的锚点并允许三级回退。
+- **`lipsync_status(models_dir=...)` 的覆盖生效了。** 原先环境变量/配置优先级高于参数，导致显式传入的
+  模型目录被静默忽略，`models_root` 回显的是程序侧默认路径。
+- **冻结 exe 里 RAM 探测不再静默失手**：`_ram_gb()` 依次尝试 psutil → `GlobalMemoryStatusEx` → PowerShell `Win32_ComputerSystem`，全部失败时把原因写进 `hardware.ram_error`，避免 auto 档位在拿不到内存时无声退化为省内存版而误导诊断。
+- **CLI 可发现性**：`locmodel_image.py --help` 现在列出被提前转发的 `video` / `lipsync` 两组子命令
+  （原先它们绕开 argparse，`--help` 里完全看不到）；新增 `lipsync help` 打印用法与"未挂载即整体失败"的硬约束。
+- **MCP 的 `lipsync_status` 返回精简**：去掉同名 verbose 事实表，只留 agent 可行动的字段
+  （`ok` / `variant` / `models` / `missing` / `paths` / `hardware` / `mount_required` / `mount_hint` / `blocking`）。
+
+### Known constraints
+
+- **Lip sync fails hard when the weights are not installed** (`lipsync_not_mounted`). This is by
+  design: there is no fallback to `generate_video`, no cloud call, and no attempt to install weights
+  behind the user's back. The only fix is LocModel → 视频 → 对口型视频 → 一键准备.
+- **Image and video instances are mutually exclusive.** One engine instance serves one mode, so
+  image generation fails while a `vid_gen` instance owns the GPU.
+- **`ref_audios` / `ref_video_audios` remain unusable** on the 3.6.1 engine build: any value is
+  rejected with 400. They are passed through only when a caller supplies them, and are documented as
+  experimental.
+- **Video results expire**: the engine keeps completed jobs for ~600 s (`--completed-ttl-seconds`),
+  so a `job_id` must be polled promptly.
+
 ## [3.2.0] — 2026-11-18
 
 Synced with LocModel 3.3.0 / sd-server. The 3.1 contract assumed a fixed engine and hard-coded

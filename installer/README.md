@@ -32,6 +32,9 @@ python -m PyInstaller --noconfirm --clean --onefile --console `
   --add-data "$PWD\scripts\locmodel_mcp.py;payload/scripts" `
   --add-data "$PWD\scripts\locmodel_edit.py;payload/scripts" `
   --add-data "$PWD\scripts\locmodel_workflow.py;payload/scripts" `
+  --add-data "$PWD\scripts\locmodel_video.py;payload/scripts" `
+  --add-data "$PWD\scripts\locmodel_lipsync.py;payload/scripts" `
+  --add-data "$PWD\scripts\lipsync_runner_embed.py;payload/scripts" `
   --add-data "$PWD\SKILL.md;payload" `
   --add-data "$PWD\README.md;payload" `
   --add-data "$PWD\README.zh-CN.md;payload" `
