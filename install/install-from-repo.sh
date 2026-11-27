@@ -17,7 +17,7 @@
 #   sh install-from-repo.sh                        # mcp + skill, auto-detect hosts
 #   sh install-from-repo.sh --host claude --register claude
 #   sh install-from-repo.sh --component skill --host all
-#   sh install-from-repo.sh --source local --from-path ./locmodel-image-repo-install-v4.0.0
+#   sh install-from-repo.sh --source local --from-path ./locmodel-image-repo-install-v4.1.0
 #   sh install-from-repo.sh --dry-run
 #
 # Exit codes: 0 ok, 1 usage, 2 download/verify failure, 3 deploy failure.
@@ -113,7 +113,7 @@ elif [ -f "$SCRIPT_DIR/manifest.json" ]; then
   MANIFEST="$SCRIPT_DIR/manifest.json"
   ok "manifest bundled with script"
 else
-  R="${REF:-v4.0.0}"
+  R="${REF:-v4.1.0}"
   MANIFEST="${TMPDIR:-/tmp}/locmodel-image-manifest.json"
   fetch "https://raw.githubusercontent.com/jaja1620/locmodel-image-MCP/$R/install/manifest.json" "$MANIFEST"
   ok "manifest fetched from $R"

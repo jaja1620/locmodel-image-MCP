@@ -59,7 +59,7 @@
 
 .EXAMPLE
     # air-gapped machine: unzip the release asset, then
-    .\install-from-repo.ps1 -Source local -FromPath .\locmodel-image-repo-install-v4.0.0
+    .\install-from-repo.ps1 -Source local -FromPath .\locmodel-image-repo-install-v4.1.0
 #>
 
 [CmdletBinding()]
@@ -171,7 +171,7 @@ else {
         Ok "manifest bundled with script (v$($script:Manifest.version))"
     }
     else {
-        $fallbackRef = if ($Ref) { $Ref } else { 'v4.0.0' }
+        $fallbackRef = if ($Ref) { $Ref } else { 'v4.1.0' }
         $url = "https://raw.githubusercontent.com/jaja1620/locmodel-image-MCP/$fallbackRef/install/manifest.json"
         $tmp = Join-Path $env:TEMP 'locmodel-image-manifest.json'
         Invoke-Download $url $tmp
