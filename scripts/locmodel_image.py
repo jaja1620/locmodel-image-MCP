@@ -62,7 +62,7 @@ from pathlib import Path
 
 import locmodel_workflow as workflow
 
-VERSION = "4.0.0"
+VERSION = "4.1.0"
 APP_NAME = "locmodel-image"
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -91,6 +91,8 @@ DEFAULTS: dict = {
         "img_gen_path": "/sdcpp/v1/img_gen",
         "jobs_path": "/sdcpp/v1/jobs",
         "models_path": "/sdapi/v1/sd-models",
+        #: recipe list; only 3.6.x answers it (older engines return 404)
+        "recipes_path": "/sdcpp/v1/recipes",
         "status_path": "/sdcpp/v1/models/status",
         "probe_timeout": 1.5,
     },
@@ -117,6 +119,24 @@ DEFAULTS: dict = {
         #: warn when an explicit canvas needs more VRAM than this per megapixel
         #: (rough working-set estimate for a 4B flow model at 1024px)
         "vram_mb_per_mp": 1600,
+    },
+    # ---- v4.1 reference-image channel (LocModel 3.6.x) ---------------------
+    # Measured on 3.6.5 / flux-2-klein-4b inside this machine's LocModel: the
+    # engine takes a *plural* ref_images array, binds it at step 0, ignores
+    # strength, negprompt and any extra payload key, and rounds the canvas to
+    # the recipe's size_multiple. These knobs only shape what we send.
+    "ref": {
+        #: pixel budget for a canvas derived from the first reference
+        "max_pixels": 1024 * 1024,
+        #: hard ceiling; 1.57 MP was measured safe, well above it risks OOM
+        "max_pixels_ceiling": 4 * 1024 * 1024,
+        #: follow_first = derive the canvas from reference #1, image = keep ours
+        "fit": "follow_first",
+        "max_images": 8,
+        #: per-file upload budget (base64 makes the payload ~1.37x bigger)
+        "max_mb": 8,
+        #: steps above this buy nothing on the ref channel (the ref is baked at t0)
+        "steps_warn": 12,
     },
     "generate": {
         "timeout": 900,
@@ -590,6 +610,9 @@ def engine_defaults(base: str, cfg: dict) -> dict:
     """
     caps = capabilities(base, cfg)
     adopted = workflow.adopt_capabilities(caps)
+    # Adopt the live recipe too: size_multiple and ref_images come from it, not
+    # from constants frozen at release time.
+    recipe = recipe_probe(base, cfg, caps)
     d = (caps.get("defaults") or {}) if isinstance(caps, dict) else {}
     sp = d.get("sample_params") or {}
     # capabilities spells the guidance block "guided"; read it through the
@@ -614,6 +637,11 @@ def engine_defaults(base: str, cfg: dict) -> dict:
         "features": dict(workflow.FEATURES),
         "model": caps.get("model") if isinstance(caps, dict) else None,
         "loras": caps.get("loras") if isinstance(caps, dict) else None,
+        # v4.1 reference channel facts
+        "recipe": dict(workflow.RECIPE_META),
+        "size_multiple": workflow.size_multiple(cfg_get(cfg, "size.multiple", 8)),
+        "ref_capable": workflow.ref_capable(),
+        "recipe_probe": recipe or None,
         "adopted": adopted,
     }
 
@@ -666,6 +694,9 @@ def get_status(cfg: dict | None = None) -> dict:
         "features": d.get("features"),
         "current_mode": d.get("current_mode"),
         "supported_modes": d.get("supported_modes"),
+        "recipe": d.get("recipe"),
+        "size_multiple": d.get("size_multiple"),
+        "ref_capable": d.get("ref_capable"),
         "config_path": str(active_config_path()),
     }
 
@@ -690,7 +721,8 @@ def _size_policy(cfg: dict, gpu: dict | None, limits: dict | None = None) -> dic
     eng_min_edge = max(int(lim.get("min_width") or 64), int(lim.get("min_height") or 64))
 
     smin = int(cfg_get(cfg, "size.min_area", 768 * 768))
-    mult = int(cfg_get(cfg, "size.multiple", 8))
+    #: recipe first (flux2 wants 16), then the config, then 8
+    mult = workflow.size_multiple(cfg_get(cfg, "size.multiple", 8))
     hard_max = min(int(cfg_get(cfg, "size.hard_max_side", 4096)), max(eng_max_w, eng_max_h))
     max_side = int(cfg_get(cfg, "size.max_side", 1536))
     auto = bool(cfg_get(cfg, "size.max_side_auto", True))
@@ -824,6 +856,280 @@ def aspect_to_size(aspect: str, area: int | None = None) -> tuple[int, int]:
 # Generation
 # --------------------------------------------------------------------------
 
+# --------------------------------------------------------------------------
+# Reference images -- LocModel 3.6.x ``ref_images`` channel
+# --------------------------------------------------------------------------
+#: accepted values for ``ref_fit``
+REF_FITS = ("follow_first", "image")
+_PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+_MIME_BY_SUFFIX = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                   ".webp": "image/webp", ".gif": "image/gif", ".bmp": "image/bmp"}
+
+#: recipes list per engine base (~150 KB); the model changes rarely, the port does
+_RECIPE_CACHE: dict = {}
+
+
+def image_size(data: bytes):
+    """Width/height from PNG / JPEG / GIF / WebP / BMP bytes, without Pillow."""
+    try:
+        if data[:8] == _PNG_MAGIC and len(data) >= 24:
+            w = int.from_bytes(data[16:20], "big")
+            h = int.from_bytes(data[20:24], "big")
+            return (w, h) if w and h else None
+        if data[:6] in (b"GIF87a", b"GIF89a") and len(data) >= 10:
+            w = int.from_bytes(data[6:8], "little")
+            h = int.from_bytes(data[8:10], "little")
+            return (w, h) if w and h else None
+        if data[:4] == b"RIFF" and data[8:12] == b"WEBP" and len(data) >= 30:
+            chunk = data[12:16]
+            if chunk == b"VP8X":
+                w = int.from_bytes(data[24:27], "little") + 1
+                h = int.from_bytes(data[27:30], "little") + 1
+                return w, h
+            if chunk == b"VP8 ":
+                w = int.from_bytes(data[26:28], "little") & 0x3FFF
+                h = int.from_bytes(data[28:30], "little") & 0x3FFF
+                return (w, h) if w and h else None
+            if chunk == b"VP8L" and len(data) >= 25:
+                bits = int.from_bytes(data[21:25], "little")
+                return ((bits & 0x3FFF) + 1, ((bits >> 14) & 0x3FFF) + 1)
+        if data[:2] == b"BM" and len(data) >= 26:
+            w = int.from_bytes(data[18:22], "little", signed=True)
+            h = abs(int.from_bytes(data[22:26], "little", signed=True))
+            return (w, h) if w and h else None
+        if data[:2] == b"\xff\xd8":  # JPEG: walk the segment chain to a SOFn frame
+            i, n = 2, len(data)
+            while i + 9 < n:
+                if data[i] != 0xFF:
+                    i += 1
+                    continue
+                marker = data[i + 1]
+                if marker in (0xD8, 0xD9) or 0xD0 <= marker <= 0xD7:
+                    i += 2
+                    continue
+                seglen = int.from_bytes(data[i + 2:i + 4], "big")
+                if marker in (0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7,
+                              0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF):
+                    h = int.from_bytes(data[i + 5:i + 7], "big")
+                    w = int.from_bytes(data[i + 7:i + 9], "big")
+                    return (w, h) if w and h else None
+                i += 2 + max(2, seglen)
+    except Exception:  # noqa: BLE001 - a malformed header only means "size unknown"
+        return None
+    return None
+
+
+def _sniff_mime(data: bytes) -> str:
+    if data[:8] == _PNG_MAGIC:
+        return "image/png"
+    if data[:2] == b"\xff\xd8":
+        return "image/jpeg"
+    if data[:6] in (b"GIF87a", b"GIF89a"):
+        return "image/gif"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    if data[:2] == b"BM":
+        return "image/bmp"
+    raise BridgeError("reference is not a PNG / JPEG / WebP / GIF / BMP image",
+                      "bad_arguments", "convert it first (any editor can re-export as PNG)")
+
+
+def _b64_to_bytes(text: str) -> bytes:
+    try:
+        return base64.b64decode(text, validate=False)
+    except Exception:  # noqa: BLE001
+        return b""
+
+
+def as_ref_uri(src: str, cfg: dict) -> dict:
+    """Normalise one reference into a data URI plus the facts we can verify.
+
+    Three input shapes are accepted because three callers exist: agents have a
+    path, code often has a data URI, and MCP clients usually paste bare base64.
+    """
+    if not isinstance(src, str) or not src.strip():
+        raise BridgeError("each reference must be a non-empty string", "bad_arguments")
+    text = src.strip()
+    limit = int(cfg_get(cfg, "ref.max_mb", 8)) * 1024 * 1024
+    source, mime, data = "path", "", b""
+
+    if text[:5].lower() == "data:":
+        head, _, b64 = text.partition(",")
+        mime = head[5:].split(";")[0].strip().lower()
+        data = _b64_to_bytes(b64)
+        source = "data_uri"
+        if not data:
+            raise BridgeError("reference data URI carries no decodable payload",
+                              "bad_arguments")
+    else:
+        p = Path(text).expanduser()
+        if p.is_file():
+            size = p.stat().st_size
+            if size > limit:
+                raise BridgeError(f"reference {p.name} is {size} bytes, over the "
+                                  f"{limit} byte budget (config ref.max_mb)",
+                                  "bad_arguments", "shrink the image or raise ref.max_mb")
+            data = p.read_bytes()
+            mime = _MIME_BY_SUFFIX.get(p.suffix.lower(), "")
+        else:
+            data = _b64_to_bytes(text)
+            source = "base64"
+            if not data:
+                raise BridgeError(f"reference not found: {p}", "bad_arguments",
+                                  "pass an absolute path, a data URI, or raw base64")
+
+    if len(data) > limit:
+        raise BridgeError(f"reference payload is {len(data)} bytes, over the {limit} byte "
+                          "budget (config ref.max_mb)", "bad_arguments")
+    if not mime or not mime.startswith("image/"):
+        mime = _sniff_mime(data)
+    w, h = image_size(data) or (0, 0)
+    return {"uri": f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}",
+            "bytes": len(data), "width": w or None, "height": h or None,
+            "source": source, "mime": mime}
+
+
+def ref_plan(ref_images, cfg: dict) -> dict:
+    """Validate the list and normalise every entry (raises on misuse)."""
+    if isinstance(ref_images, str):
+        ref_images = [ref_images]
+    items = [s for s in (ref_images or []) if isinstance(s, str) and s.strip()]
+    maxn = int(cfg_get(cfg, "ref.max_images", 8))
+    if len(items) > maxn:
+        raise BridgeError(f"{len(items)} reference images exceed the maximum {maxn}",
+                          "bad_arguments",
+                          "use reference #1 as the identity anchor and drop the rest")
+    prepared = [as_ref_uri(s, cfg) for s in items]
+    return {"items": prepared, "uris": [p["uri"] for p in prepared]}
+
+
+def ref_canvas(size, max_pixels: int, multiple: int):
+    """Fit reference #1 into the pixel budget while keeping its aspect ratio."""
+    w, h = size or (0, 0)
+    if not w or not h:
+        side = max(multiple, int(round((max_pixels ** 0.5) / multiple) * multiple))
+        return side, side, [f"the first reference reports no size; a {side}x{side} canvas "
+                            "was used instead"]
+    ratio = w / float(h)
+    hh = (max_pixels / ratio) ** 0.5
+    aw, ah = _align(hh * ratio, multiple), _align(hh, multiple)
+    while aw * ah > max_pixels and aw > multiple and ah > multiple:
+        aw -= multiple
+        ah -= multiple
+    notes = [f"canvas {aw}x{ah} derived from the first reference ({w}x{h}, "
+             f"aspect {ratio:.3f}) within the {max_pixels} px budget; pass width/height "
+             "with ref_fit=\"image\" to keep your own size"]
+    return aw, ah, notes
+
+
+def _engine_trace(img: dict) -> dict:
+    """What the engine actually built, read back from its own report.
+
+    ``generation_info`` carries the built workflow: a ``fn ...`` signature per
+    helper and the predictor call. On the ref channel that call lists
+    ``ref_latents``; when it is absent the reference was dropped and the picture
+    is plain text-to-image -- the exact failure mode this release makes visible.
+    """
+    info = (img or {}).get("generation_info") or ""
+    if not info:
+        return {}
+    fn = ""
+    fallback_fn = ""
+    call = ""
+    for line in info.splitlines():
+        text = line.strip()
+        if text.startswith("fn "):
+            if "fn main(" in text:
+                fn = text[:160]
+            elif not fallback_fn:
+                fallback_fn = text[:160]
+        elif "predictor(" in text and "ref_latents" in text:
+            call = text[:400]
+    bound = re.findall(r"reference_latent_(\d+)", call) or re.findall(r"reference_latent_(\d+)", info)
+    return {"fn": fn or fallback_fn, "ref_latents": bool(call) or bool(bound),
+            "reference_count": len(set(bound)) if bound else 0, "call": call}
+
+
+def _ref_summary(refs: dict, fit: str, budget: int) -> dict:
+    return {"channel": "ref_images", "count": len(refs["uris"]), "fit": fit,
+            "max_pixels": budget,
+            "sources": [{k: v for k, v in it.items() if k != "uri"}
+                        for it in refs["items"]]}
+
+
+def _model_hint(obj) -> str:
+    if isinstance(obj, str):
+        return obj
+    if isinstance(obj, dict):
+        for key in ("filename", "name", "model", "id", "title"):
+            if obj.get(key):
+                return str(obj[key])
+    return ""
+
+
+def recipe_probe(base: str, cfg: dict, caps: dict | None = None,
+                 refresh: bool = False) -> dict:
+    """Read the running recipe out of ``/sdcpp/v1/recipes`` and adopt its facts.
+
+    LocModel 3.6.x rounds every requested size to the recipe's ``size_multiple``
+    (16 for flux2), so a caller that does not pre-align reports a canvas the
+    engine never rendered. The endpoint does not say which recipe is live, so we
+    match it against the model the capabilities report.
+    """
+    path = cfg_get(cfg, "engine.recipes_path", "/sdcpp/v1/recipes")
+    recs = None if refresh else _RECIPE_CACHE.get(base)
+    if recs is None:
+        code, obj = None, None
+        try:
+            code, obj = http_json(base + path, timeout=15)
+        except Exception as exc:  # noqa: BLE001 - an older engine simply has no recipes
+            LOG.debug("recipes probe failed: %s", exc)
+        recs = obj.get("recipes") if isinstance(obj, dict) else obj
+        if code != 200 or not isinstance(recs, list):
+            recs = []
+        _RECIPE_CACHE[base] = recs
+
+    caps = caps if isinstance(caps, dict) else {}
+    runtime = caps.get("runtime") if isinstance(caps.get("runtime"), dict) else {}
+    rr = runtime.get("runtime_recipe") if isinstance(runtime.get("runtime_recipe"), dict) else {}
+    hints = set()
+    for raw in (caps.get("model"), rr.get("id"), rr.get("model"), rr.get("name")):
+        name = _model_hint(raw) if raw is not None else ""
+        if name:
+            hints.add(workflow._squash(Path(name).stem))
+            hints.add(workflow._squash(name))
+
+    meta: dict = {}
+    for rec in recs:
+        if not isinstance(rec, dict):
+            continue
+        keys = set()
+        for field in ("id", "name", "model", "file", "filename", "path"):
+            val = rec.get(field)
+            if val:
+                keys.add(workflow._squash(Path(str(val)).stem))
+                keys.add(workflow._squash(str(val)))
+        if not (keys & hints):
+            continue
+        feats = rec.get("effective_features") or rec.get("features") or {}
+        meta = {"id": rec.get("id") or rec.get("name") or rec.get("file"),
+                "size_multiple": rec.get("size_multiple"),
+                "defaults": rec.get("defaults"),
+                "slots": rec.get("slots"),
+                "modes": rec.get("modes")}
+        if isinstance(feats, dict) and "ref_images" in feats:
+            meta["ref_images"] = bool(feats.get("ref_images"))
+        break
+    if not meta and rr:
+        meta = {"id": rr.get("id"), "size_multiple": rr.get("size_multiple"),
+                "ref_images": rr.get("ref_images")}
+    meta = {k: v for k, v in meta.items() if v is not None}
+    if meta:
+        workflow.set_recipe_meta(meta)
+    return meta
+
+
+
 def _lock_path() -> Path:
     return active_config_path().parent / "generate.lock"
 
@@ -938,7 +1244,10 @@ def generate(prompt: str = "", cfg: dict | None = None, *, negative_prompt: str 
              seed: int = -1, count: int = 1, out_dir: str | None = None,
              filename_prefix: str = "locmodel", timeout: int | None = None,
              retry: int | None = None, guard: bool = True, model: str | None = None,
-             params: dict | None = None, dry_run: bool = False) -> dict:
+             params: dict | None = None, dry_run: bool = False,
+             ref_images: list[str] | str | None = None, ref_fit: str | None = None,
+             ref_max_pixels: int | None = None,
+             ref_strength: float | None = None) -> dict:
     cfg = cfg or load_config()
     if not prompt or not prompt.strip():
         raise BridgeError("prompt must not be empty", "bad_arguments")
@@ -955,6 +1264,15 @@ def generate(prompt: str = "", cfg: dict | None = None, *, negative_prompt: str 
             f"(config generate.max_count={cfg_max_count}, engine limits.max_batch_count="
             f"{eng_batch_max or 'unknown'})",
             "bad_arguments")
+    if ref_strength is not None:
+        # Measured on LocModel 3.6.5: the ref workflow never calls
+        # slice_sigmas_by_strength, so strength is silently inert. Refusing is
+        # kinder than accepting a knob that does nothing.
+        raise BridgeError(
+            "ref_strength is not supported: on the ref_images channel the engine ignores "
+            "strength entirely (verified: the workflow never slices sigmas). Use "
+            "redraw_image (init_image + strength) when you need a denoising strength.",
+            "unsupported_parameter")
     for name, val in (("width", width), ("height", height)):
         if val is not None and int(val) <= 0:
             raise BridgeError(f"{name} must be a positive integer, got {val}", "bad_arguments")
@@ -1000,6 +1318,64 @@ def generate(prompt: str = "", cfg: dict | None = None, *, negative_prompt: str 
                 f"{eng_batch_max})",
                 "bad_arguments")
 
+    # --- v4.1 reference-image channel --------------------------------------
+    # LocModel 3.6.x binds ref_images at step 0 and takes a *plural* key only:
+    # a singular ref_image is dropped silently and the job degrades into plain
+    # text-to-image. Everything below is normalisation plus honest reporting.
+    ref_sources = ref_images if ref_images is not None else wf.pop("ref_images", None)
+    if ref_images is not None:
+        wf.pop("ref_images", None)
+    fit = ref_fit or wf.pop("ref_fit", None) or cfg_get(cfg, "ref.fit", "follow_first")
+    fit = str(fit).strip().lower().replace("-", "_") if isinstance(fit, str) else "follow_first"
+    if fit in ("first", "follow", "followfirst"):
+        fit = "follow_first"
+    if fit not in REF_FITS:
+        raise BridgeError(f"unknown ref_fit {ref_fit!r}; supported: {', '.join(REF_FITS)}",
+                          "bad_arguments")
+    budget = ref_max_pixels if ref_max_pixels is not None else wf.pop("ref_max_pixels", None)
+    if budget is None:
+        budget = cfg_get(cfg, "ref.max_pixels", 1024 * 1024)
+    ceiling = int(cfg_get(cfg, "ref.max_pixels_ceiling", 4 * 1024 * 1024))
+    try:
+        budget = int(budget)
+    except (TypeError, ValueError):
+        raise BridgeError(f"ref_max_pixels must be an integer, got {budget!r}",
+                          "bad_arguments") from None
+    if budget < 65536 or budget > ceiling:
+        raise BridgeError(
+            f"ref_max_pixels {budget} is outside the supported range 65536-{ceiling}",
+            "bad_arguments",
+            "1048576 (1024x1024) is the default; 1570000 px was measured safe on "
+            "flux-2-klein-4b, well above that the engine runs out of VRAM")
+    refs = ref_plan(ref_sources, cfg) if ref_sources else {"items": [], "uris": []}
+    ref_active = bool(refs["uris"])
+    ref_notes: list[str] = []
+    if ref_active:
+        if workflow.ref_capable() is False:
+            ref_notes.append("the loaded recipe does not advertise ref_images; the request is "
+                             "sent anyway, but verify the result before relying on it")
+        if fit == "image" and not explicit_size and not aspect:
+            raise BridgeError('ref_fit="image" needs an explicit width/height (or an aspect preset)',
+                              "bad_arguments",
+                              "omit ref_fit to derive the canvas from the first reference")
+        for dead in ("strength", "init_image", "mask_image"):
+            if dead in wf:
+                wf.pop(dead, None)
+                ref_notes.append(f"{dead} was dropped: the ref_images channel ignores it "
+                                 "(use redraw_image when you need init_image/strength)")
+        if not explicit_size and not aspect:
+            first = refs["items"][0]
+            cw, ch, cn = ref_canvas((first["width"], first["height"]), budget,
+                                    workflow.size_multiple(cfg_get(cfg, "size.multiple", 8)))
+            width, height = cw, ch
+            ref_notes.extend(cn)
+        elif aspect:
+            ref_notes.append("the aspect preset wins over the reference framing; pass "
+                             "ref_fit=\"follow_first\" without an aspect to match the reference")
+        if (negative_prompt or "").strip():
+            ref_notes.append("negative_prompt is accepted for compatibility, but the "
+                             "ref_images channel never applies it")
+
     if aspect and not (width and height):
         w0, h0 = aspect_to_size(aspect, (width or height or 1024) ** 2 or 1024 * 1024)
         width, height = w0, h0
@@ -1019,6 +1395,7 @@ def generate(prompt: str = "", cfg: dict | None = None, *, negative_prompt: str 
 
     w, h, notes = normalize_size(width, height, cfg, gpu, guard=guard,
                                  explicit=explicit_size, limits=eng_limits)
+    notes[:0] = ref_notes
     if wf:
         inert = workflow.unsupported_keys(list(wf))
         if inert:
@@ -1040,10 +1417,16 @@ def generate(prompt: str = "", cfg: dict | None = None, *, negative_prompt: str 
         "seed": seed,
         "sample_params": {"sample_steps": max(1, steps), "sample_method": sampler},
     }
-    if cfg_scale is not None:
+    # On the ref channel the engine runs its own guidance (3.5 on flux2-klein),
+    # so only send ours when the caller actually asked for a value.
+    if cfg_scale is not None and (not ref_active or "cfg" in _explicit):
         payload["sample_params"]["guidance"] = {"txt_cfg": float(cfg_scale)}
     if model:
         payload["model"] = model
+    if ref_active:
+        # The plural key is what turns the channel on; nothing else in the
+        # payload can substitute for it.
+        payload["ref_images"] = refs["uris"]
 
     if wf:
         workflow.apply(payload, wf)
@@ -1051,6 +1434,14 @@ def generate(prompt: str = "", cfg: dict | None = None, *, negative_prompt: str 
     steps = int(payload["sample_params"].get("sample_steps") or steps)
     sampler = payload["sample_params"].get("sample_method") or sampler
     cfg_scale = (payload["sample_params"].get("guidance") or {}).get("txt_cfg", cfg_scale)
+    if ref_active and "guidance" not in (payload.get("sample_params") or {}):
+        cfg_scale = None  # the engine's own default is in force; do not report a guess
+    if ref_active:
+        warn_steps = int(cfg_get(cfg, "ref.steps_warn", 12))
+        if int(payload["sample_params"].get("sample_steps") or steps) > warn_steps:
+            notes.append(
+                f"steps={steps} on the ref_images channel: the reference is bound at step 0, "
+                "so extra steps add no fidelity (4-8 is enough; 4 steps measured ~3 s here)")
     if "count" in wf:
         count = int(wf["count"])
     if int(payload.get("seed", seed)) < 0:
@@ -1060,7 +1451,15 @@ def generate(prompt: str = "", cfg: dict | None = None, *, negative_prompt: str 
     out_path = Path(out_dir or cfg_get(cfg, "output.dir") or (Path.cwd() / "output"))
 
     if dry_run:
-        return {"ok": True, "dry_run": True, "payload": payload, "size_notes": notes,
+        brief = dict(payload)
+        if ref_active:
+            # Printing megabytes of base64 helps nobody; show the shape instead.
+            brief["ref_images"] = [
+                f"<ref {i + 1}: {it['bytes']} bytes, {it['width'] or '?'}x"
+                f"{it['height'] or '?'}, via {it['source']}>"
+                for i, it in enumerate(refs["items"])]
+        return {"ok": True, "dry_run": True, "payload": brief, "size_notes": notes,
+                "ref": _ref_summary(refs, fit, budget) if ref_active else None,
                 "engine": {"base": base, "port": port, "detected_by": src},
                 "out_dir": str(out_path), "engine_defaults": eng,
                 "size_policy": _size_policy(cfg, gpu, limits=eng_limits)}
@@ -1162,6 +1561,17 @@ def generate(prompt: str = "", cfg: dict | None = None, *, negative_prompt: str 
                     "or verify manually inside the LocModel UI.",
         }
 
+    if ref_active and images:
+        trace = _engine_trace(images[0])
+        if trace and not trace.get("ref_latents"):
+            notes.append(
+                "WARNING: the engine reports no ref_latents, so this result is plain "
+                "text-to-image and the subject will not be preserved -- check the model "
+                "(flux-2-klein or newer) and that ref_images reached the payload")
+        elif trace.get("ref_latents"):
+            notes.append(f"engine bound {trace.get('reference_count') or len(refs['items'])} "
+                         f"reference latent(s): {trace.get('fn') or 'ref channel active'}")
+
     files = []
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     prefix = re.sub(r"[^\w\-]+", "_", filename_prefix or "locmodel")[:40] or "locmodel"
@@ -1176,7 +1586,8 @@ def generate(prompt: str = "", cfg: dict | None = None, *, negative_prompt: str 
             fp = out_path / f"{prefix}_{stamp}_{i + 1}_seed{seed}_{n}{ext}"
             n += 1
         fp.write_bytes(data)
-        files.append({"path": str(fp.resolve()), "bytes": len(data)})
+        files.append({"path": str(fp.resolve()), "bytes": len(data),
+                      "engine_trace": _engine_trace(img)})
 
     meta = {
         "app": APP_NAME, "version": VERSION, "prompt": payload["prompt"],
@@ -1186,6 +1597,7 @@ def generate(prompt: str = "", cfg: dict | None = None, *, negative_prompt: str 
         "height": payload["height"], "steps": steps, "sampler": sampler,
         "cfg": cfg_scale, "seed": seed, "count": count,
         "model": current_model(base, cfg), "job_id": job_id, "port": port,
+        "ref": _ref_summary(refs, fit, budget) if ref_active else None,
         "created": datetime.now().isoformat(timespec="seconds"),
     }
     try:
@@ -1201,6 +1613,8 @@ def generate(prompt: str = "", cfg: dict | None = None, *, negative_prompt: str 
                    "steps": steps, "sampler": sampler, "cfg": cfg_scale,
                    "seed": seed, "count": count, "workflow": wf},
         "model": meta["model"], "attempts": attempts, "notes": notes,
+        "ref": _ref_summary(refs, fit, budget) if ref_active else None,
+        "engine_trace": (files[0]["engine_trace"] if files else {}),
         "elapsed_s": elapsed, "job_id": job_id,
         "engine": {"base": base, "port": port, "detected_by": src},
     }
@@ -1233,6 +1647,18 @@ def doctor(cfg: dict | None = None) -> dict:
         add("model", bool(cm), cm or "no model reported", "warn" if not cm else "info")
         eng = engine_defaults(base, cfg)
         add("engine_defaults", bool(eng.get("width")), json.dumps(eng, ensure_ascii=False))
+        ref_state = eng.get("ref_capable")
+        add("reference_images", ref_state is not False,
+            "ref_images supported by the loaded recipe" if ref_state else
+            ("ref_images state unknown (the engine reports no recipe detail)"
+             if ref_state is None else
+             "the loaded recipe does not expose ref_images: a ref request falls back "
+             "to plain text-to-image"),
+            "warn" if ref_state is False else "info")
+        add("recipe", bool(workflow.RECIPE_META),
+            json.dumps(workflow.RECIPE_META, ensure_ascii=False) if workflow.RECIPE_META
+            else "no recipe matched (engine older than 3.6, or /sdcpp/v1/recipes unavailable)",
+            "warn" if not workflow.RECIPE_META else "info")
 
     gpu = gpu_memory()
     add("gpu", gpu is not None, json.dumps(gpu, ensure_ascii=False) if gpu else "not detected (CPU / unknown vendor)", "warn")
@@ -1322,7 +1748,9 @@ def main(argv: list[str] | None = None) -> int:
     pr.add_argument("--param", action="append", metavar="KEY=VALUE")
     pr.add_argument("--all", action="store_true", help="include folded parameter groups")
 
-    g = sub.add_parser("generate", help="submit a generation job and wait for the result")
+    g = sub.add_parser("generate", add_help=False,
+                       help="submit a generation job and wait for the result")
+    g.add_argument("-h", "--help", action="help", help="show this help message and exit")
     g.add_argument("--prompt", required=True)
     g.add_argument("--negative", default="")
     g.add_argument("--width", type=int)
@@ -1341,8 +1769,21 @@ def main(argv: list[str] | None = None) -> int:
     g.add_argument("--prefix", default="locmodel")
     g.add_argument("--timeout", type=int)
     g.add_argument("--retry", type=int)
+    g.add_argument("--ref-image", action="append", metavar="PATH|DATA_URI|BASE64",
+                   help="reference image for the ref_images channel; repeatable, the "
+                        "first one anchors identity")
+    g.add_argument("--ref-fit", choices=list(REF_FITS),
+                   help="follow_first (default) derives the canvas from the first "
+                        "reference; image keeps --width/--height")
+    g.add_argument("--ref-max-pixels", type=int,
+                   help="pixel budget for an auto-derived canvas (default 1048576)")
     g.add_argument("--no-guard", action="store_true", help="force tier-A sizing: send the requested size as-is, only the engine limits may clamp it")
     g.add_argument("--dry-run", action="store_true", help="print the payload without generating")
+
+    # Same arguments as ``generate``, but the reference channel is the point rather than an
+    # option: ``--ref-image`` becomes mandatory and the help text says so.
+    gx = sub.add_parser("ref-edit", parents=[g], add_help=False,
+                        help="edit by reference: keep the subject, change only what the prompt names")
 
     e = sub.add_parser("edit", help="repaint only a masked area of an existing image")
     e.add_argument("--image", required=True, help="image to modify")
@@ -1449,7 +1890,11 @@ def main(argv: list[str] | None = None) -> int:
                 return 0
             _emit({"ok": True, "reset": True, "session": workflow.session_reset()})
             return 0
-        elif args.cmd == "generate":
+        elif args.cmd in ("generate", "ref-edit"):
+            if args.cmd == "ref-edit" and not args.ref_image:
+                raise BridgeError(
+                    "ref-edit needs at least one --ref-image", "bad_arguments",
+                    'use "generate" for text-to-image, or pass --ref-image PATH')
             res = generate(
                 args.prompt, cfg,
                 negative_prompt=args.negative, width=args.width, height=args.height,
@@ -1458,7 +1903,8 @@ def main(argv: list[str] | None = None) -> int:
                 out_dir=args.out_dir, filename_prefix=args.prefix,
                 timeout=args.timeout, retry=args.retry, guard=not args.no_guard,
                 model=args.model, params=_parse_param_list(args.param),
-                dry_run=args.dry_run,
+                dry_run=args.dry_run, ref_images=args.ref_image,
+                ref_fit=args.ref_fit, ref_max_pixels=args.ref_max_pixels,
             )
             _emit(res)
             return 0 if res.get("ok") else _EXIT["generation_failed"]

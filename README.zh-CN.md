@@ -8,7 +8,7 @@
 
 | 形态 | 入口 | 适用场景 |
 | --- | --- | --- |
-| **MCP 服务**（首选） | `scripts/locmodel_mcp.py`，提供 `generate_image`、`locmodel_status`、`list_models`、`engine_doctor`、`engine_discover` 五个工具 | 客户端支持 MCP（Claude Desktop、Cursor、Marvis、Continue 等）。模型拿到的是有 schema 约束的工具，而不是需要记忆的 shell 命令 |
+| **MCP 服务**（首选） | `scripts/locmodel_mcp.py`，提供 `generate_image`、`ref_edit`、`locmodel_status`、`list_models`、`engine_doctor`、`engine_discover` 五个工具 | 客户端支持 MCP（Claude Desktop、Cursor、Marvis、Continue 等）。模型拿到的是有 schema 约束的工具，而不是需要记忆的 shell 命令 |
 | **CLI 桥接器** | `scripts/locmodel_image.py` | 脚本化、批量任务、CI，或不支持 MCP 的客户端 |
 
 两者共用同一套引擎层：端口自发现、显存感知尺寸守卫、故障分类重试、跨进程生成锁、结构化 JSON 输出与明确的退出码。
@@ -95,14 +95,14 @@ JSON-RPC）与 **skill**（`SKILL.md`，纯 Markdown）：
 # Windows
 $d = Join-Path $env:TEMP 'locmodel-image-install'
 New-Item -ItemType Directory -Force -Path $d | Out-Null
-Invoke-WebRequest 'https://raw.githubusercontent.com/jaja1620/locmodel-image-MCP/v4.0.0/install/install-from-repo.ps1' `
+Invoke-WebRequest 'https://raw.githubusercontent.com/jaja1620/locmodel-image-MCP/v4.1.0/install/install-from-repo.ps1' `
   -OutFile "$d\install-from-repo.ps1" -UseBasicParsing
 powershell -NoProfile -ExecutionPolicy Bypass -File "$d\install-from-repo.ps1"
 ```
 
 ```sh
 # Linux / macOS
-curl -fsSL https://raw.githubusercontent.com/jaja1620/locmodel-image-MCP/v4.0.0/install/install-from-repo.sh -o /tmp/locmodel-install.sh
+curl -fsSL https://raw.githubusercontent.com/jaja1620/locmodel-image-MCP/v4.1.0/install/install-from-repo.sh -o /tmp/locmodel-install.sh
 sh /tmp/locmodel-install.sh
 ```
 
@@ -120,7 +120,7 @@ Marvis 与 WorkBuddy 运行时自己管配置，所以改为打印可直接粘�
 | `-DryRun` / `--dry-run` | 只打印计划，不写盘 |
 
 离线安装：到 [Releases](https://github.com/jaja1620/locmodel-image-MCP/releases) 下载
-`locmodel-image-repo-install-v4.0.0.zip`，解压后执行
+`locmodel-image-repo-install-v4.1.0.zip`，解压后执行
 `.\install\install-from-repo.ps1 -Source local -FromPath .`
 
 完整说明（载荷清单、退出码、卸载步骤）：
@@ -129,7 +129,7 @@ Marvis 与 WorkBuddy 运行时自己管配置，所以改为打印可直接粘�
 
 **把安装交给 AI 智能体** —— 只需给它这一句：
 
-> 读 `https://raw.githubusercontent.com/jaja1620/locmodel-image-MCP/v4.0.0/install/AGENT-INSTALL.md`，
+> 读 `https://raw.githubusercontent.com/jaja1620/locmodel-image-MCP/v4.1.0/install/AGENT-INSTALL.md`，
 > 按它把 locmodel-image（MCP 服务器 + 配套 skill）装到本机。
 
 [`install/AGENT-INSTALL.md`](install/AGENT-INSTALL.md) 是自洽的安装规范：确切 URL、各系统两个落点
@@ -196,6 +196,28 @@ v3.0 在文生图之上加了两个动作：**只改一块**和**整图重画**�
 | --- | --- | --- |
 | 只改某个区域，其他不动 | `edit_image`（需要掩码） | 掩码外由 CPU 合成保留，是硬保证 |
 | 构图不变，风格/主体换掉 | `redraw_image` | 仅作构图与色彩参考 |
+| 这个人不变，只改发型/衣服/背景 | `ref_edit` | 以参考图锚定身份，不是重绘 |
+
+### 参考图改图：身份不变，只改指定的东西（v4.1）
+
+`edit_image` 是在掩码内从噪声重绘主体，所以"人不变、只换个发型"这种小改动常常换回另一个人。引擎从 3.6.x 起就有参考图通道，4.1 把它接出来。
+
+```python
+ref_edit(prompt="same person, short black bob with a blunt fringe",
+         ref_images=[r"D:\in\me.png"],   # 1–8 张：路径 / data URI / 裸 base64 均可
+         ref_fit="follow_first",          # 画布随第一张参考图；传 "image" 就用你给的宽高
+         ref_max_pixels=1048576,          # 像素预算，默认 1024²，上限 4194304
+         seed=42)
+```
+
+四条要紧的：
+
+1. **提示词只写改动**。把参考图里的人再描述一遍，等于要求重画。
+2. **不要传 `strength`**。参考图通道不切片 sigmas，传了不生效；`ref_strength` 会被直接拒绝并指路 `redraw_image`。误传的 `init_image` 会被剥离并记进 `notes`。
+3. **单数 `ref_image` 是错误**。引擎会静默丢弃它、返回一张纯文生图，看上去像改成功了——这条坑在客户端封掉。
+4. **看 `engine_trace`**。`fn main(reference_0)` + `ref_latents=[reference_latent_0]` 表示参考图真的绑上了；`fn main()` 表示没绑，出的就是文生图。摘要里的 `engine:` 行直接写结论。
+
+画布按第一张参考图的长宽比推导，压进 `ref_max_pixels` 预算，并按 recipe 的 `size_multiple`（本机 16）对齐——和引擎自己算的一致。
 
 ### 掩码怎么给：三种，按现场条件挑
 
@@ -310,7 +332,8 @@ stdio 传输，指向 `scripts/locmodel_mcp.py` 即可。若自发现在本机�
 | 工具 | 参数 | 返回 |
 | --- | --- | --- |
 | `generate_image` | `prompt`（必填）、`negative_prompt`、`width`、`height`、`aspect`、`steps`、`sampler`、`seed`、`count`、`output_dir`、`filename_prefix`、`model`、`timeout_s`、`params`、`guard`、`dry_run` | 图片路径、实际 seed、最终尺寸、耗时、`notes` |
-| `locmodel_status` | — | 引擎状态、端口及发现方式、模型、引擎默认参数、显存、`limits`、`features`、`current_mode`、`supported_modes`、引擎实际枚举 |
+| `ref_edit` | `prompt`（必填）、`ref_images`（必填，1–8 张）、`ref_fit`、`ref_max_pixels`、`negative_prompt`、`width`、`height`、`seed`、`count`、`output_dir`、`filename_prefix`、`model`、`timeout_s`、`params`、`guard`、`dry_run` | 图片路径、参考图规划、`engine_trace`（参考图是否绑上）、最终尺寸 |
+| `locmodel_status` | — | 引擎状态、端口及发现方式、模型、引擎默认参数、显存、`limits`、`features`、`current_mode`、`supported_modes`、`recipe`、`size_multiple`、`ref_capable`、引擎实际枚举 |
 | `set_workflow_params` / `get_workflow_params` / `reset_workflow_params` | `params`（set 必填）、`keys`（reset 可选）、`include_folded`（get 可选） | 会话参数集、逐项默认值与来源、失效原因 |
 | `edit_image` | init_image（必填）、prompt（必填）、mask_image 或 regions、strength、negative_prompt、model、steps、sampler、cfg_scale、seed、mask_blur、inpaint_padding、channel、out_dir、filename_prefix、verify、dry_run | 改图路径、掩码统计、`selection`（实际用哪个模型）、`verify` 校验块 |
 | `redraw_image` | init_image（必填）、prompt（必填）、strength，其余同上（无掩码参数） | 重画路径、`selection`、`verify` |
@@ -687,6 +710,16 @@ python tests/e2e_matrix.py --stage all       # 全量（8 GB 卡约 10 分钟）
 - **图内文字**：模型固有限制，与本桥接层无关。
 
 ---
+
+## 4.1 变更
+
+- **新增 `ref_edit`，并给 `generate_image` 增加 `ref_images` / `ref_fit` / `ref_max_pixels`**：把引擎的参考图通道接出来——给 1–8 张参考图 + 一句只描述改动的提示词，身份由参考图锚定，不再重绘。工具数 19
+- **新增 `engine_trace`**：每次出图都回读引擎自己构建的工作流（`fn main(reference_0)` 与 `ref_latents`），静默退化成纯文生图这种情况会写在结果里，不用靠肉眼发现
+- **单数 `ref_image` 直接报错**：引擎对单数字段不报错而是静默丢弃，出一张文生图冒充改图成功；这条坑在客户端封掉
+- **尺寸策略接 recipe**：`size_multiple` 从 `/sdcpp/v1/recipes` 读（flux-2-klein 为 16）取代硬编码，`ref_max_pixels` 默认 1024²、上限 4.2 MP（旧的 55 万像素是 3.2 时代的上限）；判断能力支持时改为读 `features_by_mode` 与 `runtime.runtime_recipe`
+- **工作流参数扩到 53 项**：新增 `ref_images`、`ref_fit`、`ref_max_pixels`、`cache_mode`、`cache_option`、`qwen_image_layers`、`scm_mask`、`scm_policy_dynamic`、`control_image`、`control_strength`、`control_type`；数组类参数支持客户端校验
+- **CLI**：`generate` 增加 `--ref-image`（可重复）、`--ref-fit`、`--ref-max-pixels`，并新增 `ref-edit` 子命令
+- 本机实测（LocModel 3.6.5 / flux-2-klein-4b）：单参考图 12.2 s、双参考图 32.7 s、无参考图 12.6 s 且正确报告退化；`pytest tests -q` 150 项全通过。视频与对口型未实测（本机未挂模型）；新增的 P1 参数只做了透传与特性开关，未实际出图验证
 
 ## 4.0 变更
 

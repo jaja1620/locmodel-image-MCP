@@ -4,6 +4,76 @@ All notable changes to this project are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows [Semantic Versioning](https://semver.org/).
 
+## [4.1.0] — 2026-11-27
+
+Synced with LocModel 3.6.5. The engine had grown a reference-image channel that this bridge never
+exposed, so "keep this person, change the hair" was impossible from an agent: the only edit paths
+were `init_image` (which re-renders the subject and quietly substitutes a different face) and
+`redraw` (which does not keep identity either). 4.1 exposes the channel the engine already has, and
+makes a *silent* downgrade to text-to-image visible in the result.
+
+### Added
+
+- **`ref_edit` tool** — identity-preserving edit: you pass one or more reference images plus a
+  prompt that describes only the change, and the engine anchors on the references instead of
+  re-rendering from noise. Same engine layer as `generate_image` (port discovery, lock, size guard,
+  meta sidecar, dry-run), but a separate tool so an agent does not have to remember which argument
+  combination switches channels. Tool surface: 19.
+- **`ref_images` / `ref_fit` / `ref_max_pixels` on `generate_image`** — the same capability for
+  callers that already hold a prompt; giving `ref_images` selects the reference channel.
+  - `ref_images`: 1–8 paths, `data:` URIs or bare base64; local files are read, sniffed by magic
+    bytes and re-encoded as a data URI (`max_mb` 8 each). Mixed sources are fine.
+  - `ref_fit`: `follow_first` (default) derives the canvas from the first reference within the
+    pixel budget; `image` keeps your explicit `width`/`height`.
+  - `ref_max_pixels`: int, 65536–4194304, default 1048576 (1024²). The 4.0 guard's 550k ceiling
+    was sized for the 3.2-era engine; 3.6.5 renders 1.5 MP fine, so the ceiling moved up while the
+    default stayed conservative.
+- **Engine read-back** (`engine_trace` in every result, plus the `engine:` summary line): the
+  engine's own `generation_info` is parsed for the built signature (`fn main(reference_0)`) and the
+  predictor call (`ref_latents = [reference_latent_0]`). A reference edit that silently degraded to
+  text-to-image is now a reported fact, not a picture the user has to spot by eye.
+- **`engine_discover` / `locmodel_status`** report `recipe`, `size_multiple`, `ref_capable` and the
+  recipe probe; `engine_doctor` gained `reference_images` and `recipe` checks.
+- **Workflow parameter surface grew to 53 keys**: `ref_images` / `ref_fit` / `ref_max_pixels`,
+  `cache_mode` / `cache_option`, `qwen_image_layers`, `scm_mask` / `scm_policy_dynamic`,
+  `control_image` / `control_strength` / `control_type`. Array coercion (`min_items`/`max_items`)
+  was added so list-valued parameters validate client-side like scalars.
+- **`features_by_mode` and `runtime.runtime_recipe` are now honoured** — capability adoption reads
+  the per-mode feature map and the live recipe's `effective_features` and `size_multiple`, so
+  support is judged against the mode actually active rather than the union of all modes.
+- **`size_multiple`-aware sizing** — the old hard-coded 16-pixel alignment is now read from the
+  recipe (16 on flux-2-klein), so a non-multiple canvas is aligned the way the engine will align it
+  instead of being refused.
+- **CLI**: `--ref-image` (repeatable) / `--ref-fit` / `--ref-max-pixels` on `generate`, plus a
+  `ref-edit` sub-command.
+
+### Changed
+
+- On the reference channel `init_image` and `strength` are stripped from the payload and reported
+  in `notes`: `strength` has no effect there (the engine slices no sigmas), and passing `init_image`
+  alongside references is how the "different face" failure happens. `negative_prompt` is kept but
+  reported as not taking effect. `steps > 12` is kept and flagged.
+- `ref_strength` is rejected with a pointer to `redraw_image`, rather than being accepted and
+  ignored.
+
+### Fixed
+
+- A singular `ref_image` is rejected explicitly (`bad_arguments`) instead of being dropped by the
+  engine, which built `fn main()` with no reference latents and returned a plain text-to-image
+  picture that looked like a successful edit.
+
+### Verified on this machine (LocModel 3.6.5, flux-2-klein-4b Q4_0, RTX-class GPU)
+
+- single reference 1152×896, 12.2 s → `fn main(reference_0)`, one bound latent
+- two references 1152×896, 32.7 s → `fn main(reference_0, reference_1)`, two bound latents
+- no reference 768×768, 12.6 s → `fn main()`, no latent, reported as plain text-to-image
+- canvas derivation respects the budget (`1152×896`, aspect 1.286) and `ref_fit="image"` keeps a
+  caller-supplied size
+- `pytest tests -q`: 150 passed, 0 failed
+- not exercised here: `generate_video` and `lipsync_*` (no video weights mounted on this machine),
+  and the new P1 workflow keys (`control_image`, `scm_*`, `cache_*`) — they are passed through and
+  feature-gated, but were not rendered.
+
 ## [4.0.0] — 2026-11-24
 
 Synced with LocModel 3.6.1. LocModel's "视频" tab holds **two unrelated sub-panels**; 4.0 covers

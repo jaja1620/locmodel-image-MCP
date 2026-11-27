@@ -22,7 +22,7 @@ Both are **pure Python standard library**. There is nothing to `pip install`, no
 no exe to run. Requirements: **Python 3.8+** and, at *use* time, a running LocModel desktop app
 (or any `sd-server`) on `127.0.0.1` with a model loaded. Installing does not need the engine.
 
-Repository: `https://github.com/jaja1620/locmodel-image-MCP` · ref: **`v4.0.0`** · license: MIT.
+Repository: `https://github.com/jaja1620/locmodel-image-MCP` · ref: **`v4.1.0`** · license: MIT.
 
 ---
 
@@ -30,16 +30,16 @@ Repository: `https://github.com/jaja1620/locmodel-image-MCP` · ref: **`v4.0.0`*
 
 ```
 REPO        = jaja1620/locmodel-image-MCP
-REF         = v4.0.0
-RAW_BASE    = https://raw.githubusercontent.com/jaja1620/locmodel-image-MCP/v4.0.0
+REF         = v4.1.0
+RAW_BASE    = https://raw.githubusercontent.com/jaja1620/locmodel-image-MCP/v4.1.0
 MANIFEST    = $RAW_BASE/install/manifest.json
 SHA_SUMS    = $RAW_BASE/install/SHA256SUMS
-ASSET_ZIP   = https://github.com/jaja1620/locmodel-image-MCP/releases/download/v4.0.0/locmodel-image-repo-install-v4.0.0.zip
+ASSET_ZIP   = https://github.com/jaja1620/locmodel-image-MCP/releases/download/v4.1.0/locmodel-image-repo-install-v4.1.0.zip
 MCP_ENTRY   = scripts/locmodel_mcp.py
 SKILL_FILE  = SKILL.md
 ```
 
-If the user asked for a different ref (a branch, `main`, another tag), replace `v4.0.0` in
+If the user asked for a different ref (a branch, `main`, another tag), replace `v4.1.0` in
 `RAW_BASE` and `ASSET_ZIP` and say so in your final report. Do not mix refs between files.
 
 ---
@@ -169,7 +169,7 @@ Write `MCP_ROOT/install-manifest.json` so later agents can find what you did:
 ```json
 {
   "schema": "locmodel-image.repo-install-report/1",
-  "version": "4.0.0",
+  "version": "4.1.0",
   "source": "manual-fetch",
   "installed_at": "<ISO-8601 timestamp>",
   "mcp_root": "<MCP_ROOT>",

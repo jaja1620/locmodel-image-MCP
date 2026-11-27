@@ -40,7 +40,7 @@
 # 下载安装器、执行、删除
 $d = Join-Path $env:TEMP 'locmodel-image-install'
 New-Item -ItemType Directory -Force -Path $d | Out-Null
-Invoke-WebRequest 'https://raw.githubusercontent.com/jaja1620/locmodel-image-MCP/v4.0.0/install/install-from-repo.ps1' `
+Invoke-WebRequest 'https://raw.githubusercontent.com/jaja1620/locmodel-image-MCP/v4.1.0/install/install-from-repo.ps1' `
   -OutFile "$d\install-from-repo.ps1" -UseBasicParsing
 powershell -NoProfile -ExecutionPolicy Bypass -File "$d\install-from-repo.ps1"
 ```
@@ -53,13 +53,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "$d\install-from-repo.ps1"
 
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/jaja1620/locmodel-image-MCP/v4.0.0/install/install-from-repo.sh -o /tmp/locmodel-install.sh
+curl -fsSL https://raw.githubusercontent.com/jaja1620/locmodel-image-MCP/v4.1.0/install/install-from-repo.sh -o /tmp/locmodel-install.sh
 sh /tmp/locmodel-install.sh
 ```
 
 ## 离线安装
 
-Release 资产 `locmodel-image-repo-install-v4.0.0.zip` 内含 `scripts/`、`SKILL.md`、`install/` 与
+Release 资产 `locmodel-image-repo-install-v4.1.0.zip` 内含 `scripts/`、`SKILL.md`、`install/` 与
 `docs/`。解压后：
 
 ```powershell
@@ -81,7 +81,7 @@ sh ./install/install-from-repo.sh --source local --from-path .
 | `-Host auto\|claude\|marvis\|workbuddy\|cursor\|vscode\|generic\|all` | `--host` | `auto` = 凡是父目录已存在的宿主都写一份 skill |
 | `-Register claude\|cursor\|vscode\|marvis\|workbuddy\|all` | `--register` | 顺带把 MCP 条目写进该宿主配置，先留 `.bak-<时间戳>` |
 | `-InstallRoot <dir>` | `--install-root` | Python 载荷落点 |
-| `-Ref <git ref>` | `--ref` | 默认用 manifest 里固定的 `v4.0.0` |
+| `-Ref <git ref>` | `--ref` | 默认用 manifest 里固定的 `v4.1.0` |
 | `-Source manifest\|zip\|local` | `--source` | `manifest` 逐文件抓（默认）、`zip` 抓单个 release 资产、`local` 用 `-FromPath` |
 | `-FromPath <dir>` | `--from-path` | `local` 模式的源目录 |
 | `-DryRun` | `--dry-run` | 只打印计划，不写盘 |
@@ -160,7 +160,7 @@ python "$env:LOCALAPPDATA\locmodel-image\repo\scripts\locmodel_image.py" status
 
 把下面这句丢给你的智能体就够了：
 
-> 读 `https://raw.githubusercontent.com/jaja1620/locmodel-image-MCP/v4.0.0/install/AGENT-INSTALL.md`，
+> 读 `https://raw.githubusercontent.com/jaja1620/locmodel-image-MCP/v4.1.0/install/AGENT-INSTALL.md`，
 > 按它把 locmodel-image（MCP 服务器 + 配套 skill）装到本机。
 
 那份规范是自洽的：确切 URL、各系统两个落点目录、哈希表、两条可用的验证命令、各宿主配置键，

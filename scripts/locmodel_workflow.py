@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import copy
 
-VERSION = "3.2.0"
+VERSION = "4.1.0"
 
 # --- enumerations measured on sd-server master-1050 (58bb3c1) ---------------
 # These are the *offline* baseline. Whenever the engine is reachable the real
@@ -61,6 +61,34 @@ LIMITS = {
     "max_batch_count": 8, "max_upscale_width": 8192, "max_upscale_height": 8192,
 }
 FEATURES: dict = {}
+
+#: metadata of the recipe the engine is running right now. ``size_multiple``
+#: matters most: LocModel 3.6.x rounds every requested size to it (16 for the
+#: flux2 family), so a caller asking for 330x390 silently got 336x384. The
+#: engine is the authority here, never a constant frozen at release time.
+RECIPE_META: dict = {}
+
+
+def set_recipe_meta(meta: dict | None) -> dict:
+    """Merge live recipe facts (id / size_multiple / defaults / slots) in place."""
+    if isinstance(meta, dict):
+        for key in ("id", "size_multiple", "defaults", "slots", "ref_images", "modes"):
+            val = meta.get(key)
+            if val is not None:
+                RECIPE_META[key] = val
+    return dict(RECIPE_META)
+
+
+def size_multiple(cfg_multiple=None) -> int:
+    """The size grid: recipe first, then the config, then 8 (sd-server default)."""
+    val = RECIPE_META.get("size_multiple")
+    if isinstance(val, int) and val > 0:
+        return val
+    try:
+        fallback = int(cfg_multiple or 8)
+    except (TypeError, ValueError):
+        fallback = 8
+    return fallback if fallback > 0 else 8
 
 # --- the contract -----------------------------------------------------------
 # path     : where the value lands inside the payload
@@ -212,6 +240,48 @@ SPEC: dict[str, dict] = {
     "lora": dict(path=("lora",), kind="json", core=False, group="raw",
                  label='LoRA list, e.g. [{"path":"name.safetensors","multiplier":0.8}]',
                  note="needs the engine started with --lora-model-dir; unavailable otherwise"),
+
+    # ---------------- folded: reference images (LocModel 3.6.x) ------------
+    "ref_images": dict(path=("ref_images",), kind="array", min_items=1, max_items=8,
+                       core=False, group="ref",
+                       label="reference images (paths / data URIs / raw base64)",
+                       note="the FIRST entry is the identity anchor; the engine takes "
+                            "this plural key only -- a singular ref_image is ignored "
+                            "and silently falls back to text-to-image"),
+    "ref_fit": dict(path=None, kind="enum", enum=["follow_first", "image"],
+                    core=False, group="ref", label="reference framing",
+                    note="follow_first = derive the canvas from the first reference; "
+                         "image = keep the width/height you gave"),
+    "ref_max_pixels": dict(path=None, kind="int",
+                           min=65536, max=4194304, core=False, group="ref",
+                           label="pixel budget for an auto-derived canvas",
+                           note="default 1048576 (1024x1024); 1570000 was measured safe "
+                                "on flux-2-klein, higher risks OOM"),
+
+    # ---------------- folded: 3.6.x engine switches ------------------------
+    "cache_mode": dict(path=("cache_mode",), kind="str", core=False, group="cache",
+                       label="cache mode (cache / cache_dit / cache_unet)",
+                       note="engine-reported values only; unknown words are passed "
+                            "through and rejected by the engine if wrong"),
+    "cache_option": dict(path=("cache_option",), kind="str", core=False, group="cache",
+                         label="cache option"),
+    "qwen_image_layers": dict(path=("qwen_image_layers",), kind="int", min=0, max=64,
+                              core=False, group="raw",
+                              label="qwen-image layer split",
+                              note="qwen-image family only; passed through unvalidated "
+                                   "because no such model is installed locally"),
+    "scm_mask": dict(path=("scm_mask",), kind="str", core=False, group="raw",
+                     label="SCM mask (experimental, 3.6.x)"),
+    "scm_policy_dynamic": dict(path=("scm_policy_dynamic",), kind="bool", core=False,
+                       group="raw", label="SCM dynamic policy (experimental, 3.6.x)"),
+    "control_image": dict(path=("control_image",), kind="str", core=False,
+                          group="control",
+                          label="control image (controlnet / VACE)",
+                          note="needs a control-capable recipe; harmless elsewhere"),
+    "control_strength": dict(path=("control_strength",), kind="float", min=0.0, max=1.0,
+                             core=False, group="control", label="control strength"),
+    "control_type": dict(path=("control_type",), kind="str", core=False, group="control",
+                         label="control type (e.g. canny / depth)"),
 }
 
 #: names accepted for every knob (canonical + aliases)
@@ -302,6 +372,19 @@ def _coerce(key: str, value, spec: dict):
         raise ParamError(f"{name} is not one of the supported values",
                          "supported: " + ", ".join(enum))
 
+    if kind == "array":
+        if isinstance(value, (list, tuple)):
+            items = [str(v).strip() for v in value if str(v).strip()]
+        else:
+            s = str(value).strip()
+            items = [p.strip() for p in s.split(",") if p.strip()] if s else []
+        lo, hi = spec.get("min_items"), spec.get("max_items")
+        if lo is not None and len(items) < lo:
+            raise ParamError(f"{key} needs at least {lo} item(s), got {len(items)}")
+        if hi is not None and len(items) > hi:
+            raise ParamError(f"{key} takes at most {hi} items, got {len(items)}")
+        return items
+
     if kind == "intlist":
         if isinstance(value, (list, tuple)):
             try:
@@ -384,7 +467,9 @@ def apply(payload: dict, resolved: dict) -> dict:
     """Write validated parameters into the submit payload, in place."""
     for key, value in resolved.items():
         spec = SPEC.get(key)
-        if not spec:
+        #: path=None marks a tool-side knob (ref_fit / ref_max_pixels): it shapes
+        #: our own request and must never be sent to the engine.
+        if not spec or not spec.get("path"):
             continue
         _assign(payload, spec["path"], value)
     return payload
@@ -471,6 +556,8 @@ FALLBACK = {
     "scheduler": "default", "flow_shift": None, "eta": None,
     "distilled_guidance": 3.5, "slg_scale": 0.0,
     "clip_skip": -1, "strength": 0.75, "seed": 42, "count": 1,
+    # additive only: nothing here changes an existing fallback value
+    "ref_images": None, "cache_mode": None,
 }
 
 
@@ -574,7 +661,35 @@ def adopt_capabilities(caps: dict | None) -> dict:
         FEATURES.update(merged)
         adopted["features"] = len(merged)
 
+    # LocModel 3.6.x splits the feature block per mode and adds a recipe-level
+    # truth (``runtime.runtime_recipe.effective_features``). The current mode is
+    # the most specific statement the engine can make, so it wins over the flat
+    # blocks, and the recipe-level flags win over the mode block.
+    by_mode = caps.get("features_by_mode") or {}
+    mode = caps.get("current_mode")
+    if isinstance(by_mode, dict) and mode and isinstance(by_mode.get(mode), dict):
+        overlay = {k: v for k, v in by_mode[mode].items() if isinstance(v, bool)}
+        if overlay:
+            FEATURES.update(overlay)
+            adopted["features_by_mode"] = len(overlay)
+    runtime = caps.get("runtime") if isinstance(caps.get("runtime"), dict) else {}
+    rr = runtime.get("runtime_recipe") if isinstance(runtime, dict) else None
+    if isinstance(rr, dict):
+        eff = rr.get("effective_features")
+        if isinstance(eff, dict):
+            overlay = {k: v for k, v in eff.items() if isinstance(v, bool)}
+            if overlay:
+                FEATURES.update(overlay)
+                adopted["runtime_recipe_features"] = len(overlay)
+        if rr.get("size_multiple") is not None:
+            set_recipe_meta({"size_multiple": rr.get("size_multiple"),
+                             "id": rr.get("id") or rr.get("recipe")})
+
     return adopted
+
+def ref_capable() -> bool | None:
+    """Can the loaded model take reference images? None when the engine did not say."""
+    return feature_enabled("ref_images")
 
 
 def feature_enabled(feature: str) -> bool | None:
@@ -600,6 +715,10 @@ _KEY_FEATURE = {
     "img_cfg": "img_cfg", "distilled_guidance": "distilled_guidance",
     "high_noise_steps": "high_noise", "high_noise_cfg": "high_noise",
     "high_noise_sampler": "high_noise",
+    "ref_images": "ref_images", "ref_fit": "ref_images",
+    "ref_max_pixels": "ref_images", "cache_mode": "cache",
+    "cache_option": "cache", "control_image": "control_image",
+    "control_strength": "control_image", "control_type": "control_image",
 }
 
 
@@ -646,7 +765,7 @@ def table(caps: dict | None = None, session: dict | None = None,
             "kind": spec["kind"],
             "range": _range_text(spec),
             "tier": "core" if spec.get("core") else spec.get("group"),
-            "payload_path": ".".join(spec["path"]),
+            "payload_path": ".".join(spec.get("path") or ()) or "(tool-level)",
             "label": spec.get("label", ""),
         }
         if spec.get("note"):

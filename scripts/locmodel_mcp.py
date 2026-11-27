@@ -93,6 +93,37 @@ def _policy_text() -> str:
             f"big canvases come back with a VRAM warning instead of being resized")
 
 
+def _ref_props() -> dict:
+    """Properties shared by every reference-image entry point."""
+    return {
+        "ref_images": {
+            "type": "array",
+            "items": {"type": "string"},
+            "minItems": 1,
+            "maxItems": 8,
+            "description": (
+                "Reference images (LocModel 3.6+ ref channel). Each entry: an absolute file "
+                "path, a data URI, or bare base64. The FIRST one anchors identity and, with "
+                "ref_fit='follow_first', its framing sets the canvas. Only the plural name "
+                "works: a singular ref_image is silently dropped by the engine and the job "
+                "degrades into plain text-to-image."
+            ),
+        },
+        "ref_fit": {
+            "type": "string",
+            "enum": ["follow_first", "image"],
+            "description": "follow_first (default) derives the canvas from reference #1; "
+                           "image keeps the width/height (or aspect) you pass.",
+        },
+        "ref_max_pixels": {
+            "type": "integer",
+            "description": "Pixel budget when the canvas is derived from reference #1. "
+                           "Default 1048576 (1024x1024); allowed 65536-4194304. 1.57 MP was "
+                           "measured safe on flux-2-klein-4b, above that VRAM runs out.",
+        },
+    }
+
+
 def _generate_schema() -> dict:
     return {
         "type": "object",
@@ -151,6 +182,7 @@ def _generate_schema() -> dict:
                     "only -- nothing is written to LocModel's config."
                 ),
             },
+            **_ref_props(),
             "timeout_s": {"type": "integer", "description": "Job timeout in seconds."},
             "guard": {"type": "boolean",
                       "description": "Keep the automatic size guard (area floor, VRAM-aware long "
@@ -166,6 +198,22 @@ def _generate_schema() -> dict:
     }
 
 
+_REF_EDIT_KEYS = ("prompt", "negative_prompt", "width", "height", "aspect", "steps",
+                  "sampler", "seed", "count", "output_dir", "filename_prefix", "model",
+                  "cfg", "params", "timeout_s", "guard", "dry_run")
+
+
+def _ref_edit_schema() -> dict:
+    """Focused schema: the ref channel always wins the sizing argument."""
+    props = dict(_generate_schema()["properties"])
+    props.update(_ref_props())
+    return {
+        "type": "object",
+        "properties": {key: props[key] for key in _REF_EDIT_KEYS if key in props},
+        "required": ["prompt", "ref_images"],
+    }
+
+
 TOOLS = [
     {
         "name": "generate_image",
@@ -177,6 +225,19 @@ TOOLS = [
             "mid-range GPU."
         ),
         "inputSchema": _generate_schema(),
+    },
+    {
+        "name": "ref_edit",
+        "description": (
+            "Edit a photo by reference: same local engine, but the ref_images channel is "
+            "forced on, which keeps the subject's identity intact instead of re-imagining it "
+            "(a plain generate_image with one reference also works; this tool simply cannot "
+            "fall back). Describe ONLY the change you want -- 'same person, change the "
+            "hairstyle to a short bob'. The canvas follows reference #1 by default. Strength, "
+            "mask and negative prompt do not exist on this channel; use redraw_image when you "
+            "need them."
+        ),
+        "inputSchema": _ref_edit_schema(),
     },
     {
         "name": "locmodel_status",
@@ -942,6 +1003,27 @@ def _video_call(name: str, args: dict) -> dict:
                             "summary": f"video tool failed [{code}]: {exc}" + (f"\n{hint}" if hint else "")})
 
 
+def _ref_guard(args: dict) -> str | None:
+    """Refuse the two ways a reference call silently degrades.
+
+    Both were measured on LocModel 3.6.5: a singular ref_image produced
+    ``fn main()`` with no ref_latents (plain text-to-image), and ref_strength rode
+    along without changing the workflow at all.
+    """
+    params = args.get("params") if isinstance(args.get("params"), dict) else {}
+    if "ref_image" in args or "ref_image" in params:
+        return ("ref_image is not accepted: the engine reads only the plural ref_images array "
+                "and drops a singular key without any error, which turns the job into plain "
+                "text-to-image (verified: workflow fn main() with no ref_latents). "
+                "Call it as ref_images=['<absolute path>'].")
+    if "ref_strength" in args or "ref_strength" in params:
+        return ("ref_strength is not supported: on the ref_images channel the engine ignores "
+                "strength entirely (the workflow never slices sigmas by it). Use redraw_image "
+                "(init_image + strength) when you need a denoising strength, or keep the "
+                "engine defaults.")
+    return None
+
+
 def call_tool(name: str, args: dict) -> dict:
     if name in ("lipsync_status", "lipsync_generate"):
         return _lipsync_call(name, args or {})
@@ -954,10 +1036,17 @@ def call_tool(name: str, args: dict) -> dict:
 
     cfg = core.load_config()
 
-    if name == "generate_image":
+    if name in ("generate_image", "ref_edit"):
         prompt = (args or {}).get("prompt") or ""
         if not prompt.strip():
             return _error("Missing required argument: prompt.")
+        refusal = _ref_guard(args or {})
+        if refusal:
+            return _error(refusal)
+        if name == "ref_edit" and not (args or {}).get("ref_images"):
+            return _error("ref_edit needs ref_images (1-8 references: a path, a data URI or "
+                          "bare base64). Without one it would be plain text-to-image -- use "
+                          "generate_image for that.", None)
         try:
             res = core.generate(
                 prompt,
@@ -978,6 +1067,9 @@ def call_tool(name: str, args: dict) -> dict:
                 model=args.get("model"),
                 guard=bool(args.get("guard", True)),
                 dry_run=bool(args.get("dry_run", False)),
+                ref_images=args.get("ref_images"),
+                ref_fit=args.get("ref_fit"),
+                ref_max_pixels=args.get("ref_max_pixels"),
             )
         except core.BridgeError as exc:
             return _error(str(exc), exc.hint)
@@ -993,6 +1085,10 @@ def call_tool(name: str, args: dict) -> dict:
                      f"size policy: {json.dumps(pol, ensure_ascii=False)}"]
             if res.get("size_notes"):
                 lines.append("notes: " + " | ".join(res["size_notes"]))
+            if res.get("ref"):
+                ref = res["ref"]
+                lines.append(f"reference: {ref['count']} image(s), fit={ref['fit']}, "
+                             f"budget={ref['max_pixels']} px")
             out = dict(res)
             out["summary"] = "\n".join(lines)
             return _text(out)
@@ -1007,6 +1103,15 @@ def call_tool(name: str, args: dict) -> dict:
                  f"elapsed: {res['elapsed_s']}s"]
         for f in res["files"]:
             lines.append(f"path: {f['path']}")
+        if res.get("ref"):
+            ref = res["ref"]
+            lines.append(f"reference: {ref['count']} image(s), fit={ref['fit']}, "
+                         f"budget={ref['max_pixels']} px (identity anchored by #1)")
+        trace = res.get("engine_trace") or {}
+        if trace.get("fn") and (res.get("ref") or trace.get("ref_latents")):
+            lines.append("engine: " + (trace.get("fn") or "call recorded")
+                         + (" | reference latent bound" if trace.get("ref_latents")
+                            else " | NO reference latent: plain text-to-image"))
         wf = (res.get("params") or {}).get("workflow") or {}
         if wf:
             lines.append("workflow: " + ", ".join(f"{k}={v}" for k, v in wf.items()))

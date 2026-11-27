@@ -1,7 +1,7 @@
 ---
 name: locmodel-image
-description: 用本机 LocModel（stable-diffusion.cpp / sd-server）的离线引擎出图、改图、生成视频与做对口型视频。当用户要求「画一张 / 生成图片 / 出个图 / 给我几张方案草图 / 把这段描述画出来 / 生成配图」，或要求「改这张图 / 把图里的 X 换成 Y / 在图上加个东西 / 只改这块 / 局部重绘 / 在这张图基础上重画」且希望用本机模型、离线处理时使用。覆盖提示词优化、参数选择、掩码标注、局部重绘与整图重画、模型选择与切换、调用入口（MCP 工具或 CLI）、失败排查全流程。不适用：需要精确文字排版的海报（本地扩散模型文字拼写不可靠）、需要联网检索的图。视频部分覆盖 LocModel「视频」选项卡下的两个子界面：「生成视频」（引擎 vid_gen：文生/图生视频）与「对口型视频」（InfiniteTalk + Wan2.1-I2V-14B-480P 独立管线，上传人物图片/视频 + 音频让嘴型跟着唱）。对口型视频必须由用户在 LocModel 里下载并挂载专用模型与运行环境，未挂载将导致整体任务失败，无降级路径。
-version: 4.0.0
+description: 用本机 LocModel（stable-diffusion.cpp / sd-server）的离线引擎出图、改图、生成视频与做对口型视频。当用户要求「画一张 / 生成图片 / 出个图 / 给我几张方案草图 / 把这段描述画出来 / 生成配图」，或要求「改这张图 / 把图里的 X 换成 Y / 在图上加个东西 / 只改这块 / 局部重绘 / 在这张图基础上重画」且希望用本机模型、离线处理时使用。覆盖提示词优化、参数选择、掩码标注、局部重绘与整图重画、参考图改图（保持人物/主体不变只改指定内容）、模型选择与切换、调用入口（MCP 工具或 CLI）、失败排查全流程。不适用：需要精确文字排版的海报（本地扩散模型文字拼写不可靠）、需要联网检索的图。视频部分覆盖 LocModel「视频」选项卡下的两个子界面：「生成视频」（引擎 vid_gen：文生/图生视频）与「对口型视频」（InfiniteTalk + Wan2.1-I2V-14B-480P 独立管线，上传人物图片/视频 + 音频让嘴型跟着唱）。对口型视频必须由用户在 LocModel 里下载并挂载专用模型与运行环境，未挂载将导致整体任务失败，无降级路径。
+version: 4.1.0
 license: MIT
 ---
 
@@ -14,7 +14,7 @@ license: MIT
 
 | 形态 | 入口 | 适用 |
 | --- | --- | --- |
-| **MCP 工具**（首选） | 图片：`generate_image` / `edit_image` / `redraw_image` / `list_edit_models` / `load_model` / `locmodel_status` / `list_models` / `engine_doctor` / `engine_discover`；视频：`generate_video` / `job_status` / `cancel_job` / `list_recipes`（子界面「生成视频」）、`lipsync_status` / `lipsync_generate`（子界面「对口型视频」） | 客户端支持 MCP 时，工具直挂、有 schema 约束，不依赖模型是否"想起"读文档 |
+| **MCP 工具**（首选） | 图片：`generate_image` / `ref_edit` / `edit_image` / `redraw_image` / `list_edit_models` / `load_model` / `locmodel_status` / `list_models` / `engine_doctor` / `engine_discover`；视频：`generate_video` / `job_status` / `cancel_job` / `list_recipes`（子界面「生成视频」）、`lipsync_status` / `lipsync_generate`（子界面「对口型视频」） | 客户端支持 MCP 时，工具直挂、有 schema 约束，不依赖模型是否"想起"读文档 |
 | **CLI 桥接器** | `python scripts/locmodel_image.py <子命令>`（图片）；`... video <子命令>`（生成视频）；`... lipsync status|run`（对口型视频） | 脚本化、批处理、无 MCP 环境、排障 |
 
 ## 能力边界（必须先判断）
@@ -26,6 +26,7 @@ license: MIT
 - 输出格式 `png` / `jpeg` / `webp`（`output_format`，JPEG/WebP 可配 `output_compression`）+ 同名 `_meta.json`（记录 prompt、seed、尺寸、耗时，便于复现）
 - 二次放大：hires fix 按**倍数**（`hires_scale`）或按**目标尺寸**（`hires_target_width/height`）两种给法
 - **改图**：给定一张已有图片，用一句话指定"这块改成什么"（局部重绘 / inpaint），或"整体按新描述重画"（`redraw`）
+- **参考图改图**（`ref_edit` 或 `generate_image(ref_images=...)`）：给 1–8 张参考图，只写"要改什么"，引擎以参考图锚定主体身份（换发型 / 换服装 / 换背景而人不变成另一个人）
 - 掩码来源三选一：掩码 PNG、矩形 / 多边形坐标、按颜色阈值选区域；掩码外的像素由 CPU 侧还原为原图，不会被改动
 - 模型选择：自动按优先级挑可编辑模型，也能指定具体模型或让引擎先加载
 - **生成视频**：`generate_video` 走引擎 `POST /sdcpp/v1/vid_gen`，文生视频 / 图生视频（`init_image`）/ 首尾帧（`end_image`）/ 参考图（`ref_images`）/ VACE 控制帧，输出 webm / webp / avi；异步 job + `job_status` 续查
@@ -268,7 +269,29 @@ python scripts/locmodel_image.py doctor
 | --- | --- | --- |
 | "把这块改成 X"、"这个人手里的杯子换成咖啡"、"去掉这个电线杆" | `edit_image` | 只重绘掩码内，掩码外原样保留 |
 | "按这个描述重画一张"、"风格换成水彩"、"整体重做" | `redraw_image` | 整图重画，原图只作为构图与色彩参考 |
+| "这个人不变，把发型换成短发"、"换件外套"、"背景换成海边"、"保持脸，只改颜色" | `ref_edit` | 参考图通道，身份由参考图锚定，不是重画 |
 | 没有原图 | `generate_image` | 文生图 |
+
+### 参考图改图：身份不变，只改指定的东西（v4.1 / LocModel 3.6.5+）
+
+用户说"人别变、只改发型/衣服/背景"时**必须**走这条通道。用 `edit_image` 会重绘主体、人脸被换成另一个人；用 `redraw_image` 也不保身份。
+
+```python
+ref_edit(prompt="same person, short black bob with a blunt fringe",
+         ref_images=[r"D:\in\me.png"],          # 1–8 张，路径 / data URI / 裸 base64 均可
+         ref_fit="follow_first",                 # 默认：画布随第一张参考图；要给自己的宽高就传 "image"
+         ref_max_pixels=1048576,                 # 像素预算，默认 1024²，上限 4194304
+         seed=42)
+```
+
+四条规矩：
+
+1. **提示词只写改动内容**（"same person, ..."），不要把原图里的人再描述一遍，否则等于让模型重画。
+2. **不要传 `strength`**。参考图通道不切片 sigmas，`strength` 传了也不生效；工具直接拒绝 `ref_strength` 并指路 `redraw_image`。同传 `init_image` 会被自动剥离并记进 `notes`。
+3. **单数 `ref_image` 会报错**。引擎对单数字段不报错而是静默丢弃，出图退化成纯文生图（`fn main()`）；工具在客户端就拦下，改写成 `ref_images=[...]`。
+4. **看 `engine_trace` 验收**。`fn main(reference_0)` + `ref_latents=[reference_latent_0]` 才是真走了通道；`fn main()` 就是没绑上参考图。摘要里的 `engine:` 行直接给结论。
+
+预算与尺寸：画布默认按第一张参考图的长宽比推导，压到 `ref_max_pixels` 以内并按 recipe 的 `size_multiple`（本机 16）对齐；`ref_fit="image"` 时用你给的 `width`/`height`，超出预算会提示但照出。
 
 ### 掩码：三种给法，按现场条件挑
 
@@ -544,6 +567,10 @@ python scripts/locmodel_image.py lipsync run --image "D:/me.jpg" --audio "D:/son
 | `RAM weight capacity exceeded` → `generate_video returned no results` | 2 | umt5-xxl Q8 文本编码器要 ≥6 GB 空闲内存 | 关掉占内存的程序；换更小的编码器或先用 480P 小配置 |
 | 视频 job 一直 `queued` | — | 引擎单 slot，视频一次只跑一个作业 | 等前一个跑完；`job_status` 会返回 `queue_position` |
 | job `failed` 且已经过了 10 分钟才查 | — | 引擎只保留完成结果 600 秒 | 重新提交；下次拿到 `job_id` 立刻轮询 |
+| `bad_arguments` + `ref_image` | — | 传了单数 `ref_image` | 引擎会静默忽略它、退化成纯文生图；改传 `ref_images=[...]` |
+| `bad_arguments` + `ref_strength` | — | 参考图通道没有 strength 语义 | 删掉该参数；要按强度重画用 `redraw_image` |
+| 参考图改图后人物变成另一个人 | — | 没走 ref 通道（退化为文生图），或同传了 `init_image` | 看摘要 `engine:` 行有没有 `ref_latents`；确认工具是 `ref_edit` |
+| 参考图改图"改不动" | — | 提示词把原图描述了一遍，或要改的幅度太小 | 提示词只留改动内容；必要时换 seed；局部改动改用 `edit_image` + 掩码 |
 | `lipsync_not_mounted` | — | 对口型专用模型 / venv 未挂载 | 让用户走 LocModel「视频 → 对口型视频 → 一键准备」，装完再 `lipsync status` |
 
 ## 常用命令速查

@@ -41,7 +41,7 @@ and verify their hashes".
 # download the installer, run it, remove it
 $d = Join-Path $env:TEMP 'locmodel-image-install'
 New-Item -ItemType Directory -Force -Path $d | Out-Null
-Invoke-WebRequest 'https://raw.githubusercontent.com/jaja1620/locmodel-image-MCP/v4.0.0/install/install-from-repo.ps1' `
+Invoke-WebRequest 'https://raw.githubusercontent.com/jaja1620/locmodel-image-MCP/v4.1.0/install/install-from-repo.ps1' `
   -OutFile "$d\install-from-repo.ps1" -UseBasicParsing
 powershell -NoProfile -ExecutionPolicy Bypass -File "$d\install-from-repo.ps1"
 ```
@@ -55,13 +55,13 @@ nothing is written to the registry and no admin rights are needed.
 
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/jaja1620/locmodel-image-MCP/v4.0.0/install/install-from-repo.sh -o /tmp/locmodel-install.sh
+curl -fsSL https://raw.githubusercontent.com/jaja1620/locmodel-image-MCP/v4.1.0/install/install-from-repo.sh -o /tmp/locmodel-install.sh
 sh /tmp/locmodel-install.sh
 ```
 
 ## Offline
 
-Release asset `locmodel-image-repo-install-v4.0.0.zip` contains `scripts/`, `SKILL.md`, `install/`
+Release asset `locmodel-image-repo-install-v4.1.0.zip` contains `scripts/`, `SKILL.md`, `install/`
 and `docs/`. Unzip it on the target machine, then:
 
 ```powershell
@@ -84,7 +84,7 @@ the bundled `install/manifest.json`.
 | `-Host auto\|claude\|marvis\|workbuddy\|cursor\|vscode\|generic\|all` | `--host` | `auto` writes the skill to every host directory whose parent already exists |
 | `-Register claude\|cursor\|vscode\|marvis\|workbuddy\|all` | `--register` | also write the MCP entry into that host's config. A `.bak-<timestamp>` is kept first |
 | `-InstallRoot <dir>` | `--install-root` | where the Python payload goes |
-| `-Ref <git ref>` | `--ref` | default: the ref pinned in the manifest (`v4.0.0`) |
+| `-Ref <git ref>` | `--ref` | default: the ref pinned in the manifest (`v4.1.0`) |
 | `-Source manifest\|zip\|local` | `--source` | `manifest` fetches file by file (default), `zip` fetches one release asset, `local` uses `-FromPath` |
 | `-FromPath <dir>` | `--from-path` | source tree for `local` |
 | `-DryRun` | `--dry-run` | print the plan, write nothing |
@@ -167,7 +167,7 @@ will make the host load whichever entry it reads last.
 
 Give your agent this line and nothing else:
 
-> Read `https://raw.githubusercontent.com/jaja1620/locmodel-image-MCP/v4.0.0/install/AGENT-INSTALL.md`
+> Read `https://raw.githubusercontent.com/jaja1620/locmodel-image-MCP/v4.1.0/install/AGENT-INSTALL.md`
 > and follow it to install locmodel-image (MCP server + companion skill) on this machine.
 
 The spec is self-contained: it states the exact URLs, the two destination directories per OS, the

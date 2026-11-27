@@ -10,7 +10,7 @@ interfaces:
 
 | Interface | Entry point | Use it when |
 | --- | --- | --- |
-| **MCP server** (recommended) | `scripts/locmodel_mcp.py` — tools `generate_image`, `locmodel_status`, `list_models`, `engine_doctor`, `engine_discover` | Your AI client speaks Model Context Protocol (Claude Desktop, Cursor, Marvis, Continue, …). The model gets a typed tool instead of memorising shell commands. |
+| **MCP server** (recommended) | `scripts/locmodel_mcp.py` — tools `generate_image`, `ref_edit`, `locmodel_status`, `list_models`, `engine_doctor`, `engine_discover` | Your AI client speaks Model Context Protocol (Claude Desktop, Cursor, Marvis, Continue, …). The model gets a typed tool instead of memorising shell commands. |
 | **CLI bridge** | `scripts/locmodel_image.py` | Scripts, batch jobs, CI, or clients without MCP support. |
 
 Both share the same engine layer: port auto-discovery, VRAM-aware size guard, failure
@@ -110,14 +110,14 @@ Nothing to build, nothing to unpack, no admin rights, no registry. Two pieces ar
 # Windows
 $d = Join-Path $env:TEMP 'locmodel-image-install'
 New-Item -ItemType Directory -Force -Path $d | Out-Null
-Invoke-WebRequest 'https://raw.githubusercontent.com/jaja1620/locmodel-image-MCP/v4.0.0/install/install-from-repo.ps1' `
+Invoke-WebRequest 'https://raw.githubusercontent.com/jaja1620/locmodel-image-MCP/v4.1.0/install/install-from-repo.ps1' `
   -OutFile "$d\install-from-repo.ps1" -UseBasicParsing
 powershell -NoProfile -ExecutionPolicy Bypass -File "$d\install-from-repo.ps1"
 ```
 
 ```sh
 # Linux / macOS
-curl -fsSL https://raw.githubusercontent.com/jaja1620/locmodel-image-MCP/v4.0.0/install/install-from-repo.sh -o /tmp/locmodel-install.sh
+curl -fsSL https://raw.githubusercontent.com/jaja1620/locmodel-image-MCP/v4.1.0/install/install-from-repo.sh -o /tmp/locmodel-install.sh
 sh /tmp/locmodel-install.sh
 ```
 
@@ -135,7 +135,7 @@ printed instead.
 | `-Source` / `--source` | `manifest` (file by file, default), `zip` (release asset), `local` (offline, with `-FromPath`) |
 | `-DryRun` / `--dry-run` | print the plan, write nothing |
 
-Offline install: download `locmodel-image-repo-install-v4.0.0.zip` from
+Offline install: download `locmodel-image-repo-install-v4.1.0.zip` from
 [Releases](https://github.com/jaja1620/locmodel-image-MCP/releases), unzip, then
 `.\install\install-from-repo.ps1 -Source local -FromPath .`
 
@@ -145,7 +145,7 @@ Full guide, payload tables, exit codes and uninstall steps:
 
 **Delegating the install to an AI agent** — hand it this single line:
 
-> Read `https://raw.githubusercontent.com/jaja1620/locmodel-image-MCP/v4.0.0/install/AGENT-INSTALL.md`
+> Read `https://raw.githubusercontent.com/jaja1620/locmodel-image-MCP/v4.1.0/install/AGENT-INSTALL.md`
 > and follow it to install locmodel-image (MCP server + companion skill) on this machine.
 
 [`install/AGENT-INSTALL.md`](install/AGENT-INSTALL.md) is a self-contained spec: exact URLs, the two
@@ -215,6 +215,36 @@ v3.0 adds two verbs on top of text-to-image: **repaint one region** and **redraw
 | --- | --- | --- |
 | Change one area, keep the rest | `edit_image` (needs a mask) | Preserved outside the mask — enforced, not hoped for |
 | Same composition, new style/subject | `redraw_image` | Used as a structural reference only |
+| Keep this person, change the hair/clothes/background | `ref_edit` | Anchored on the references, not re-rendered |
+
+### Keep the subject, change one thing (reference channel, 4.1)
+
+`edit_image` repaints the subject from noise inside the mask, so a small identity-preserving change
+("same person, shorter hair") tends to return a *different person*. The engine has had a reference
+channel for this since 3.6.x; 4.1 exposes it.
+
+```python
+ref_edit(prompt="same person, short black bob with a blunt fringe",
+         ref_images=[r"D:\in\me.png"],   # 1-8 paths, data: URIs or bare base64
+         ref_fit="follow_first",          # canvas from the first reference; "image" keeps your width/height
+         ref_max_pixels=1048576,          # budget, default 1024^2, ceiling 4194304
+         seed=42)
+```
+
+Rules that matter:
+
+1. **Describe only the change.** Re-describing the reference invites a re-render.
+2. **No `strength`.** The reference channel slices no sigmas, so `strength` does nothing there;
+   `ref_strength` is rejected with a pointer to `redraw_image`. A stray `init_image` is stripped
+   and reported in `notes`.
+3. **`ref_image` (singular) is an error.** The engine silently ignores it and returns plain
+   text-to-image; the client now refuses it and asks for `ref_images=[...]`.
+4. **Read `engine_trace`.** `fn main(reference_0)` plus `ref_latents=[reference_latent_0]` means the
+   reference bound; `fn main()` means it did not and the picture is text-to-image. The `engine:` line
+   in the summary states which one it was.
+
+The canvas follows the first reference's aspect ratio, is capped at `ref_max_pixels`, and is aligned
+to the recipe's `size_multiple` (16 here) — the same arithmetic the engine applies.
 
 ### Give the mask three ways
 
@@ -353,7 +383,8 @@ unreliable on your machine:
 | Tool | Arguments | Returns |
 | --- | --- | --- |
 | `generate_image` | `prompt` (required), `negative_prompt`, `width`, `height`, `aspect`, `steps`, `sampler`, `seed`, `count`, `output_dir`, `filename_prefix`, `model`, `timeout_s` | Image paths, effective seed, final size, elapsed time |
-| `locmodel_status` | — | Engine state, port + how it was found, model, engine defaults, GPU memory |
+| `ref_edit` | `prompt` (required), `ref_images` (required, 1-8), `ref_fit`, `ref_max_pixels`, `negative_prompt`, `width`, `height`, `seed`, `count`, `output_dir`, `filename_prefix`, `model`, `timeout_s`, `params`, `guard`, `dry_run` | Image paths, the reference plan, `engine_trace` (did the reference bind?), effective size |
+| `locmodel_status` | — | Engine state, port + how it was found, model, engine defaults, GPU memory, `recipe`, `size_multiple`, `ref_capable` |
 | `edit_image` | `init_image` (required), `prompt` (required), `mask_image` \| `regions`, `strength`, `negative_prompt`, `model`, `steps`, `sampler`, `cfg_scale`, `seed`, `mask_blur`, `inpaint_padding`, `channel`, `out_dir`, `filename_prefix`, `verify`, `dry_run` | Edited image paths, mask stats, `selection` (model actually used), `verify` block |
 | `redraw_image` | `init_image` (required), `prompt` (required), `strength`, + the same optional set | Redrawn image paths, `selection`, `verify` |
 | `list_edit_models` | — | Models with family/rank, which can edit regions, and the automatic pick |
@@ -784,6 +815,31 @@ directory writability in one shot.
 - **Text in images**: a limitation of the models, not of the bridge.
 
 ---
+
+## What changed in 4.1
+
+- **`ref_edit`, and `ref_images` / `ref_fit` / `ref_max_pixels` on `generate_image`** — the engine's
+  reference-image channel is now reachable from an agent: pass 1–8 references and a prompt that
+  names only the change, and identity is anchored on the references instead of re-rendered. Tool
+  surface: 19.
+- **`engine_trace`** — every result now reports what the engine actually built (`fn main(reference_0)`
+  plus `ref_latents`), so a silent downgrade to text-to-image is visible in the output rather than
+  discovered by eye.
+- **Singular `ref_image` is refused.** The engine drops it without complaint and returns a
+  text-to-image picture that looks like a successful edit; that trap is now closed client-side.
+- **Sizing follows the recipe.** `size_multiple` is read from `/sdcpp/v1/recipes` (16 on
+  flux-2-klein) instead of a hard-coded 16, `ref_max_pixels` defaults to 1024² with a 4.2 MP ceiling
+  (the 550k guard was a 3.2-era limit), and `features_by_mode` / `runtime.runtime_recipe` are
+  honoured when judging support.
+- **Workflow surface: 53 keys**, adding `ref_images`, `ref_fit`, `ref_max_pixels`, `cache_mode`,
+  `cache_option`, `qwen_image_layers`, `scm_mask`, `scm_policy_dynamic`, `control_image`,
+  `control_strength`, `control_type`; array-valued parameters now validate client-side.
+- **CLI**: `--ref-image` (repeatable), `--ref-fit`, `--ref-max-pixels`, plus a `ref-edit`
+  sub-command.
+- Verified here on LocModel 3.6.5 / flux-2-klein-4b: one reference 12.2 s, two references 32.7 s,
+  no reference 12.6 s with the degradation correctly reported; `pytest tests -q` 150 passed. Video
+  and lip-sync paths were not exercised (no weights mounted); the new P1 keys are passed through and
+  feature-gated but were not rendered.
 
 ## What changed in 4.0
 
